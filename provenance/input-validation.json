@@ -1,0 +1,104 @@
+{
+  "repositories": [
+    {
+      "name": "ACK",
+      "revision": "ff4a6c3bb0f471a9dd186293a47b62c83829b97d"
+    },
+    {
+      "name": "SoC",
+      "revision": "fc30e54174d254ff7f33622a9278e4435f6718d2"
+    },
+    {
+      "name": "KernelSU",
+      "revision": "0c0fdb960178fa12d80d6cbcfdcb6ad8be6a865d"
+    },
+    {
+      "name": "SUSFS",
+      "revision": "5e0b2b925865000ca7dce993ecf1d281ee312887"
+    },
+    {
+      "name": "MiCode device",
+      "revision": "7fad87dc178d09489b74a714e4a525d56f546855"
+    },
+    {
+      "name": "MiCode touch",
+      "revision": "7d10d738b2c4299f3b8549c61a01ece39f19c788"
+    },
+    {
+      "name": "kernel/prebuilts/build-tools",
+      "revision": "78af2daf5d9d36fc6e1ddb28ee0d7b6516709eb4"
+    },
+    {
+      "name": "platform/prebuilts/build-tools",
+      "revision": "e25d4821f50af3f6e0b87d7751dfd27037445fe5"
+    },
+    {
+      "name": "platform/prebuilts/clang-tools",
+      "revision": "4155cb466dcd9b53c6f873829c53aa6f905449dd"
+    },
+    {
+      "name": "platform/prebuilts/clang/host/linux-x86",
+      "revision": "4a7d0a5e443c27d8f68fbd46abfab464e1355a69"
+    },
+    {
+      "name": "platform/prebuilts/rust-toolchain/linux-x86",
+      "revision": "a04f70c5179f23eff11c58cb480acee4afb1334b"
+    },
+    {
+      "name": "LZ4",
+      "revision": "83376b665fe6742171407350bb51e963215d6088"
+    },
+    {
+      "name": "mkbootimg",
+      "revision": "f5c284e8998dd8a085cf027bb518b6c2b84cf744"
+    },
+    {
+      "name": "AnyKernel3",
+      "revision": "020dfeccf9d7e962a48400fc94d3e451df92eead"
+    }
+  ],
+  "partitions": [
+    {
+      "name": "nuwa/init_boot",
+      "sha256": "c048882b0f8655a900ff630cb430a5823bf660c28a5d5605ad3d6668cae887b3"
+    },
+    {
+      "name": "nuwa/vendor_boot",
+      "sha256": "f5103dc7a47d7815be2158c0061a0816037e35b218637b21c56c6bcef414fdee"
+    },
+    {
+      "name": "nuwa/vendor_dlkm",
+      "sha256": "a5331c556684de69527583ffa466031026b3d23dd82342c3ca51074c4117aba0"
+    },
+    {
+      "name": "madrid/vendor_boot",
+      "sha256": "363083282ae177afe6593399fad2cf11c0a8df9fcaad17b66e65e6b1f725be1d"
+    },
+    {
+      "name": "madrid/vendor_dlkm",
+      "sha256": "e9c6bb7d14181a007f858fd5e8252d9b46bb0717037eea17ce3d0aec6687959a"
+    },
+    {
+      "name": "madrid/system_dlkm",
+      "sha256": "393b14d878fd16624477a3e81b2d3702186c120bd738701885c0a98f5c15caf3"
+    }
+  ],
+  "xiaomi_modules": 54,
+  "status": "passed",
+  "toolchain_tree_differences": {},
+  "build_input_equivalence": {
+    "stockmods/vendor_boot/ramdisk0/lib/modules/modules.load": true,
+    "k618/boot-test/init_boot.img": true,
+    "nikohyper/img/vendor_boot.img": true,
+    "touch/fts_spi": true,
+    "touch/xiaomi": true,
+    "available_second_stage_module_order": true
+  },
+  "module_inventory_policy": "Only modules available in the selected 6.18 payload participate in the second-stage load order.",
+  "limits": {
+    "memory_max_gib": 12,
+    "memory_high_gib": 10,
+    "swap_max_gib": 1,
+    "cpu_cores": 4
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "upstream_url": "https://github.com/OnePlusOSS/android_kernel_oneplus_sm8850.git",
+  "upstream_revision": "fc30e54174d254ff7f33622a9278e4435f6718d2",
+  "upstream_tree": "55a3bcd483dd2ada0d25ff5052c7352ae4525d90",
+  "target_tree": "c28261f1b054e9f0ef69b280dbb25fa52d734678",
+  "patch": "patches/soc-sm8550.patch",
+  "patch_sha256": "603781bb95d6cdc7b7a2a6bd1eef4611ec2f5fd97ae77a7c3716ec7e026b957a",
+  "additional_source": {
+    "url": "https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git",
+    "revision": "7fad87dc178d09489b74a714e4a525d56f546855"
+  },
+  "recipe": [
+    "Checkout the fixed upstream revision",
+    "Apply the patch with git apply --index",
+    "Verify git write-tree against target_tree",
+    "Commit the device integration baseline before the normal build"
+  ]
+}

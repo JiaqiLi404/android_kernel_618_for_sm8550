@@ -1,0 +1,16 @@
+adsp_sleepmon cdsprm cfg80211 charger-ulog-glink core_hang_detect coresight coresight-csr
+coresight-cti coresight-dummy coresight-funnel coresight-remote-etm coresight-replicator
+coresight-stm coresight-tgu coresight-tmc coresight-tpda coresight-tpdm cpu_voltage_cooling
+f_fs_ipc_log fsa4480-i2c gh_irq_lend gh_tlmm_vm_mem_access goodix_fod heap_mem_ext_v01 hvc_gunyah
+i3c-master-msm-geni leds-qti-flash leds-qti-tri-led lt9611uxc mac80211 memlat_vendor mhi
+mhi_dev_satellite mhi_dev_uci microdump_collector msm_lmh_dcvs msm_memshare msm_performance
+msm_sharedmem msm_show_epoch msm_show_resume_irq msm_sysstats nb7vpq904m nvmem_qfprom pci-msm-drv
+phy-generic phy-msm-m31-eusb2 phy-qcom-emu policy_engine pwm-qti-lpg qbt_handler qcom-hv-haptics
+qcom_edac qcom_iommu_debug qrtr-mhi qrtr-smd qsee_ipc_irq_bridge qseecom_proxy
+qti_battery_debug rdbg rq_stats sdpm_clk sg slim-qcom-ngd-ctrl slimbus snd-soc-hdmi-codec
+snd-usb-audio-qmi soc_sleep_stats spmi-glink-debug sps_drv stm_console stm_core stm_ftrace
+stm_p_basic stm_p_ost subsystem_sleep_stats sysmon_subsystem_stats usb_bam usb_f_ccid usb_f_cdev
+usb_f_gsi usb_f_qdss xlogchar
+ tmecom-intf
+ qcom_rimps
+memlat_scmi

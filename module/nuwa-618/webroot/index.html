@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nuwa 6.18</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1b1c1e; --muted: #6a6f76; --line: #e3e5e8;
+    --accent: #2f6fde; --warn: #b3261e; --ok: #1f7a3a; --track: #c9ccd1; --bar: rgba(255, 255, 255, .92);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121315; --card: #1d1f22; --text: #e6e7e9; --muted: #9aa0a6; --line: #2e3135;
+      --accent: #8ab4f8; --warn: #f2b8b5; --ok: #81c995; --track: #4a4e54; --bar: rgba(40, 42, 46, .92);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px 16px 96px; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans CJK SC", sans-serif;
+  }
+  .head { display: flex; align-items: center; justify-content: space-between; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; overflow-wrap: anywhere; }
+  .card { background: var(--card); border-radius: 14px; padding: 6px 14px; margin-bottom: 14px; }
+  .card h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 10px 0 4px; }
+  .row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 10px 0; border-top: 1px solid var(--line);
+  }
+  .card h2 + .row { border-top: none; }
+  .row .text { flex: 1; min-width: 0; }
+  .row b { font-weight: 500; display: block; }
+  .row small { color: var(--muted); display: block; font-size: 12.5px; }
+  .row small.live { color: var(--accent); }
+  .row small:empty { display: none; }
+  .row[data-boot] b::after {
+    content: "重启生效"; margin-left: 6px; padding: 1px 6px; border-radius: 8px; font-size: 11px;
+    color: var(--muted); border: 1px solid var(--line); vertical-align: 1px;
+  }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; padding: 6px 0 10px; margin: 0; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+  select, textarea, button { font: inherit; color: var(--text); }
+  select { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; max-width: 46%; }
+  textarea {
+    width: 100%; min-height: 64px; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px; resize: vertical;
+  }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 0 12px; }
+  button { border: none; border-radius: 18px; padding: 8px 16px; background: var(--accent); color: var(--card); }
+  button.plain { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  button.small { padding: 4px 12px; font-size: 13px; }
+  button:disabled, select:disabled, input:disabled, textarea:disabled { opacity: .45; }
+  .switch { appearance: none; -webkit-appearance: none; width: 44px; height: 26px; border-radius: 13px;
+    background: var(--track); position: relative; flex: none; margin: 0; transition: background .15s; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+    border-radius: 50%; background: #fff; transition: left .15s; }
+  .switch:checked { background: var(--accent); }
+  .switch:checked::after { left: 21px; }
+  .note { color: var(--muted); font-size: 12.5px; padding: 0 2px; overflow-wrap: anywhere; }
+  .warn { color: var(--warn); }
+  #tabs {
+    position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; gap: 4px;
+    padding: 5px; border-radius: 26px; background: var(--bar); border: 1px solid var(--line);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, .18); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  }
+  #tabs button { background: transparent; color: var(--muted); padding: 8px 14px; border-radius: 21px; white-space: nowrap; }
+  #tabs button.on { background: var(--accent); color: var(--card); }
+  #msg { position: fixed; left: 16px; right: 16px; bottom: 78px; padding: 10px 14px; border-radius: 10px;
+    background: var(--text); color: var(--bg); font-size: 14px; display: none; }
+</style>
+</head>
+<body>
+<div class="head">
+  <h1>nuwa 6.18</h1>
+  <button class="plain small" id="refresh">刷新</button>
+</div>
+<div class="sub" id="sub">读取中…</div>
+
+<div id="tab-home">
+<p class="note">开 = 内核的改动（不装模块也是这样），关 = 原厂。</p>
+<p class="note" id="trial-state">修改设置后试用两分钟；需要重启的设置从下次启动开始验证。</p>
+<div class="card">
+  <h2>zram</h2>
+  <div class="row" data-boot><div class="text"><b>分层压缩</b><small>lz4 换出，十分钟没碰过的页再用 zstd 压一遍（关：原厂 lzo-rle）</small><small class="live" id="live-zram"></small></div>
+    <input type="checkbox" class="switch" data-sw="zram_tiered"></div>
+  <div class="row" data-boot><div class="text"><b>大小</b><small>HyperOS 写多少都按这里建</small></div>
+    <select data-num="zram_mb">
+      <option value="0">原厂（HyperOS 定）</option><option value="12288">12 GB</option>
+      <option value="16384">16 GB</option><option value="18432">18 GB</option><option value="24576">24 GB</option>
+    </select></div>
+  <div class="row"><div class="text"><b>重压缩间隔</b><small>醒着的时间，挂起不算；在小核上跑</small></div>
+    <select data-num="recomp_secs">
+      <option value="300">5 分钟</option><option value="600">10 分钟</option>
+      <option value="1200">20 分钟</option><option value="1800">30 分钟</option>
+    </select></div>
+</div>
+<div class="card">
+  <h2>内存</h2>
+  <div class="row"><div class="text"><b>回收少走映射</b><small>问"这页被谁用过"时结论一定就停</small></div>
+    <input type="checkbox" class="switch" data-sw="rmap_stop"></div>
+  <div class="row"><div class="text"><b>多进程共享的页留着</b><small>32 个以上进程映射的页直接当在用</small></div>
+    <input type="checkbox" class="switch" data-sw="rmap_keep"></div>
+  <div class="row"><div class="text"><b>被杀的大进程立刻回收</b><small>匿名内存加 swap 超过 32 MB 的</small></div>
+    <input type="checkbox" class="switch" data-sw="kill_reap"></div>
+  <div class="row"><div class="text"><b>重要线程不被回收节流</b><small>内存很紧时实时和高优先级线程不睡</small></div>
+    <input type="checkbox" class="switch" data-sw="throttle_exempt"></div>
+</div>
+<div class="card">
+  <h2>IO</h2>
+  <div class="row"><div class="text"><b>保留系统哈希缓存</b><small>内存充足且未超预算时少回收；内存紧张时恢复正常回收</small></div>
+    <input type="checkbox" class="switch" data-sw="verity_cache"></div>
+  <div class="row"><div class="text"><b>EROFS 解压线程优先级 3</b><small>关：原厂的 1</small></div>
+    <input type="checkbox" class="switch" data-sw="erofs_prio"></div>
+  <div class="row" data-boot><div class="text"><b>loop 设备高优先级</b><small>每个 APEX 的读都经过它</small></div>
+    <input type="checkbox" class="switch" data-sw="loop_hipri"></div>
+  <div class="row"><div class="text"><b>每帧的 fence 查询省掉名字</b><small>SurfaceFlinger 每帧都问，没人读名字</small></div>
+    <input type="checkbox" class="switch" data-sw="fence_names"></div>
+</div>
+</div>
+
+<div id="tab-standby" hidden>
+<div class="card">
+  <h2>唤醒</h2>
+  <div class="row"><div class="text"><b>唤醒锁拦截</b><small>modem 数据、IPA、蓝牙 HAL 等；代价是推送可能晚到、蓝牙可能断连</small></div>
+    <input type="checkbox" class="switch" data-sw="wl_blocker"></div>
+  <div class="row"><div class="text"><b>无时限唤醒锁 500 ms 到期</b><small>写进 /sys/power/wake_lock 不带时限的</small></div>
+    <input type="checkbox" class="switch" data-sw="wl_untimed"></div>
+  <div class="row"><div class="text"><b>闹钟只保持到响后 5 ms</b><small>原厂固定 2 秒</small></div>
+    <input type="checkbox" class="switch" data-sw="alarm_hold"></div>
+</div>
+<div class="card">
+  <h2>自己的拦截名单</h2>
+  <textarea id="wl-user" placeholder="唤醒源名字，用 ; 分开"></textarea>
+  <div class="buttons"><button id="wl-save">保存</button></div>
+  <p class="note" id="wl-default"></p>
+</div>
+<div class="card">
+  <h2>待机</h2>
+  <dl class="kv" id="kv-standby"></dl>
+  <p class="note">插着电脑时 USB 一直保持唤醒，挂起要拔线看。</p>
+</div>
+</div>
+
+<div id="tab-debug" hidden>
+<div class="card">
+  <h2>zram</h2>
+  <dl class="kv" id="kv-zram"></dl>
+  <div class="buttons"><button id="recomp-now">立即重压缩一轮</button></div>
+</div>
+<div class="card">
+  <h2>开机以来</h2>
+  <dl class="kv" id="kv-count"></dl>
+</div>
+<div class="card">
+  <h2>占着唤醒最久的</h2>
+  <dl class="kv" id="kv-ws"></dl>
+</div>
+</div>
+
+<div id="tabs">
+  <button data-tab="home" class="on">首页</button>
+  <button data-tab="standby">待机</button>
+  <button data-tab="debug">调试</button>
+</div>
+<div id="msg"></div>
+
+<script>
+"use strict";
+const SCRIPT = "sh /data/adb/modules/nuwa_618/webui.sh";
+let seq = 0;
+
+// ksu.exec(command, options, callback name): the module WebUI bridge of KernelSU and KernelSU-Next
+function exec(cmd) {
+  return new Promise((resolve, reject) => {
+    if (typeof ksu === "undefined") {
+      reject(new Error("请在 KernelSU / KernelSU-Next 管理器的模块页里打开"));
+      return;
+    }
+    const cb = "nuwa618_exec_" + Date.now() + "_" + seq++;
+    window[cb] = (errno, stdout, stderr) => {
+      delete window[cb];
+      resolve({ errno, stdout, stderr });
+    };
+    try {
+      ksu.exec(cmd, "{}", cb);
+    } catch (e) {
+      delete window[cb];
+      reject(e);
+    }
+  });
+}
+
+let msgTimer;
+function say(text) {
+  const m = document.getElementById("msg");
+  m.textContent = text;
+  m.style.display = "block";
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => (m.style.display = "none"), 2600);
+}
+
+const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
+function kv(id, pairs) {
+  const dl = document.getElementById(id);
+  dl.textContent = "";
+  for (const [k, v] of pairs) {
+    const dt = document.createElement("dt");
+    const dd = document.createElement("dd");
+    dt.textContent = k;
+    dd.textContent = v === undefined || v === "" ? "—" : v;
+    dl.append(dt, dd);
+  }
+}
+
+let state = {};
+async function load() {
+  let r;
+  try {
+    r = await exec(SCRIPT + " status");
+  } catch (e) {
+    document.getElementById("sub").textContent = e.message;
+    return;
+  }
+  state = {};
+  const ws = [];
+  for (const line of r.stdout.split(/\r?\n/)) {
+    const i = line.indexOf("=");
+    if (i < 1) continue;
+    const k = line.slice(0, i).trim(), v = line.slice(i + 1).trim();
+    if (k === "ws") ws.push(v);
+    else state[k] = v;
+  }
+  const s = state;
+  document.getElementById("trial-state").textContent =
+    s.trial_error === "1" ? "试用保护暂不可用，修改设置前请重新检查。" :
+    s.trial_rollback === "1" ? "上次试用未通过，已恢复先前设置。" :
+    Number(s.trial_active) > 0 ? "设置试用中：" + s.trial_active + " 项；正常运行两分钟后保留。" :
+    Number(s.trial_queued) > 0 ? "有 " + s.trial_queued + " 项设置将在下次启动时开始试用。" :
+    "设置已保留；修改后会试用两分钟。";
+  document.getElementById("sub").textContent = "内核 " + (s.kernel || "?") + " · 模块 " + (s.module || "?") +
+    (s.k618 === "1" ? "" : " · 这不是 k618 内核，开关不起作用");
+  for (const el of document.querySelectorAll("[data-sw]")) {
+    el.checked = s["sw_" + el.dataset.sw] === "1";
+    el.disabled = s.k618 !== "1";
+  }
+  for (const el of document.querySelectorAll("[data-num]")) el.value = s[el.dataset.num];
+  document.getElementById("live-zram").textContent = s.zram_alg ?
+    "现在：" + s.zram_alg + (s.zram_recomp ? " / " + s.zram_recomp : "") + "，" + Math.round((s.zram_size || 0) / 1024) + " GB" : "";
+  const wl = document.getElementById("wl-user");
+  if (document.activeElement !== wl) wl.value = s.wl_user || "";
+  document.getElementById("wl-default").textContent = "内置名单：" + (s.wl_default || "（关）");
+  kv("kv-standby", [["挂起成功", s.suspend_ok], ["挂起失败", s.suspend_fail], ["整机深度睡眠", s.aosd ? s.aosd + " 次" : ""]]);
+  kv("kv-zram", [
+    ["算法", (s.zram_alg || "") + (s.zram_recomp ? " / " + s.zram_recomp : "")],
+    ["大小", s.zram_size ? s.zram_size + " MB" : ""],
+    ["存了", s.zram_orig ? s.zram_orig + " MB，压成 " + s.zram_compr + " MB" + (s.zram_ratio ? "（" + s.zram_ratio + " : 1）" : "") : ""],
+    ["占内存", s.zram_used ? s.zram_used + " MB" : ""],
+    ["重压缩", (s.recomp_rounds || "0") + " 轮，" + (s.recomp_ms || "0") + " ms" + (s.recomp_cpu_s ? "，CPU " + s.recomp_cpu_s + " s" : "")],
+  ]);
+  kv("kv-count", [
+    ["提前停的映射遍历", s.rmap_walk_stops], ["多进程共享直接留下", s.rmap_mapcount_kept],
+    ["节流放行", s.throttle_exempt_count], ["EROFS 解压优先级", s.erofs_prio],
+  ]);
+  kv("kv-ws", ws.map((l) => {
+    const i = l.lastIndexOf(" ");
+    return [l.slice(0, i), Math.round(Number(l.slice(i + 1)) / 1000) + " s"];
+  }));
+}
+
+document.addEventListener("change", async (ev) => {
+  const el = ev.target;
+  if (el.dataset.sw) {
+    const r = await exec(SCRIPT + " switch " + el.dataset.sw + " " + (el.checked ? 1 : 0));
+    say(r.errno ? "没改成：" + (r.stdout || r.stderr) : el.closest(".row").hasAttribute("data-boot") ? "下次开机生效" : "已生效");
+    load();
+  } else if (el.dataset.num) {
+    const r = await exec(SCRIPT + " num " + el.dataset.num + " " + q(el.value));
+    say(r.errno ? "没改成：" + (r.stdout || r.stderr) : el.closest(".row").hasAttribute("data-boot") ? "下次开机生效" : "已生效");
+    load();
+  }
+});
+
+document.getElementById("wl-save").onclick = async () => {
+  const v = document.getElementById("wl-user").value.trim().replace(/\s*[;\n]\s*/g, ";");
+  const r = await exec(SCRIPT + " wl_user " + q(v));
+  say(r.errno ? "没存上" : "已保存，开机后也用");
+  load();
+};
+document.getElementById("recomp-now").onclick = async () => {
+  await exec(SCRIPT + " recomp_now");
+  say("已开始，几秒后刷新");
+  setTimeout(load, 3000);
+};
+document.getElementById("refresh").onclick = load;
+for (const b of document.querySelectorAll("#tabs button")) {
+  b.onclick = () => {
+    for (const x of document.querySelectorAll("#tabs button")) x.classList.toggle("on", x === b);
+    for (const t of ["home", "standby", "debug"]) document.getElementById("tab-" + t).hidden = t !== b.dataset.tab;
+  };
+}
+load();
+</script>
+</body>
+</html>

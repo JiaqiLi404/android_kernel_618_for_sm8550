@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.ruff_cache/
+logs/
+dist/
+backup/
+*.part
+assets/*.tar.zst
+assets/*.deb
