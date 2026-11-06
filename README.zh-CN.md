@@ -4,7 +4,7 @@
 
 [English](README.md)
 
-[下载内核包](https://github.com/JiaqiLi404/android_kernel_618_for_sm8550/releases/tag/v6.18.32-nuwa.1) · 预发布，真机验证待完成。这些安装包早于“模块层 ramdisk”和 13 / 13 Ultra 驱动，需要它们时请从源码构建。
+[下载内核包](https://github.com/JiaqiLi404/android_kernel_618_for_sm8550/releases/tag/v6.18.32-nuwa.2) · 预发布，真机验证待完成。
 
 目标设备：**小米 13 Pro / nuwa**（主要目标）。已包含 **小米 13 / fuxi** 与 **小米 13 Ultra / ishtar** 的驱动适配（触摸、屏幕面板调校与 DC 调光、相机 PHY 与 OIS、PM8008 相机电源、ToF 测距、充电节点），但尚未在这两台手机上运行过。配套环境：**NikoHyper / HyperOS 4，OS4.0.24.0.XEOCNXM**。其他 ROM / vendor 组合需单独适配。
 
