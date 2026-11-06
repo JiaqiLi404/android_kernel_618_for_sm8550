@@ -17,6 +17,9 @@
  *   rt     an RT thread whose previous CPU runs the draw thread is placed elsewhere (rt=1) instead of
  *          preempting it (rt=0, the kernel's own placement)
  *   sync   only that its hook went in: the rule acts inside EAS, which QEMU does not run
+ *   diag   em is 0 when loaded (the device tree's model by default); diag=1 counts wake-ups (a thread
+ *          that sleeps 1 ms at a time moves the count), diag=0 takes the probes out (the count
+ *          stands still); the overutilized time stays 0 here, EAS being off
  *
  * Results: "k618_place_test: PASS ..." / "FAIL ..." lines and a summary in the kernel log.
  */
@@ -102,6 +105,19 @@ static long k618pt_stat(const char *key)
 static bool k618pt_state_has(const char *text)
 {
 	return strstr(k618pt_read("state"), text);
+}
+
+/* the "wakes" line of the state file, summed over the clusters (-1: no such line) */
+static long k618pt_wakes(void)
+{
+	const char *s = k618pt_read("state"), *p = strstr(s, "\nwakes ");
+	long w[4] = {};
+	int n;
+
+	if (!p)
+		return -1;
+	n = sscanf(p + 7, "%ld %ld %ld %ld", &w[0], &w[1], &w[2], &w[3]);
+	return n >= 1 ? w[0] + w[1] + w[2] + w[3] : -1;
 }
 
 /* ---------------------------------------------------------------- em */
@@ -464,6 +480,41 @@ out:
 	k618pt_write("test_comm", "\n");
 }
 
+/* sleeps 1 ms at a time: a wake-up a millisecond */
+static int k618pt_sleeper(void *unused)
+{
+	while (!kthread_should_stop())
+		usleep_range(1000, 1100);
+	return 0;
+}
+
+static void k618pt_diag_checks(void)
+{
+	struct task_struct *t = k618pt_thread(k618pt_sleeper, "k618pt_sleep", 0);
+	long before, after;
+
+	if (!t) {
+		pr_err("FAIL diag: cannot start\n");
+		k618pt_fail++;
+		return;
+	}
+	CHECK(k618pt_state_has("\ndiag 0\n"), "diag: off when loaded");
+	k618pt_write("diag", "1");
+	CHECK(k618pt_state_has("\ndiag 1\n"), "diag: diag=1 put the probes in");
+	before = k618pt_wakes();
+	msleep(300);
+	after = k618pt_wakes();
+	CHECK(before >= 0 && after - before >= 100, "diag: wake-ups counted (%ld in 300 ms)", after - before);
+	k618pt_write("diag", "0");
+	CHECK(k618pt_state_has("\ndiag 0\n"), "diag: diag=0 took them out");
+	before = k618pt_wakes();
+	msleep(300);
+	after = k618pt_wakes();
+	CHECK(after == before, "diag: nothing counted with diag=0 (%ld)", after - before);
+	kthread_stop(t);
+	pr_info("diag: %s", strstr(k618pt_read("state"), "\neas ") ? strstr(k618pt_buf, "\neas ") + 1 : "?\n");
+}
+
 static int __init k618pt_init(void)
 {
 	struct path path;
@@ -475,6 +526,8 @@ static int __init k618pt_init(void)
 	}
 	path_put(&path);
 	CHECK(k618pt_state_has("\nhooks rt 1 pull 1 slice 1 sync 1\n"), "hooks: all nine went in");
+	CHECK(!strcmp(k618pt_read("em"), "0\n"), "em: 0 when loaded (the device tree's model)");
+	k618pt_diag_checks();
 	/* whatever the module was loaded with: every part on, as the checks expect */
 	k618pt_write("rt", "1");
 	k618pt_write("pull", "1");

@@ -56,7 +56,7 @@ def main():
         check(archive.read('Image') == kernel, 'AK3 kernel differs from boot.img')
         check(archive.read('ramdisk-new.cpio.lz4') == ramdisk, 'AK3 ramdisk differs from boot.img')
         check(archive.read('anykernel.sh') == (project / 'tools/ak3/anykernel-618.sh').read_bytes(), 'AK3 installer differs')
-    with zipfile.ZipFile(dist / 'nuwa-618-v4.zip') as archive:
+    with zipfile.ZipFile(dist / 'nuwa-618-v5.zip') as archive:
         check(archive.testzip() is None and 'module.prop' in archive.namelist(), 'Invalid tuning-module zip')
         expected = {str(p.relative_to(project / 'module/nuwa-618')): p.read_bytes()
                     for p in (project / 'module/nuwa-618').rglob('*') if p.is_file()}

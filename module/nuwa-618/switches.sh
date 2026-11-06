@@ -2,7 +2,8 @@
 # nuwa-618's switches, for post-fs-data.sh, service.sh and webui.sh. The 6.18 kernel (k618) has
 # every change on by default; a switch that is OFF puts the stock value back. A
 # switch is a file in /data/adb, there when the switch is off; a choice (a size, an interval) is a
-# file holding the number. No file at all = the kernel as built.
+# file holding the number. No file at all = the kernel as built. The switches of SW_ASKED are the
+# other way round: off unless their file is there (off by default).
 #
 #   switch            file (nuwa_618_...)    what the kernel has on / what off writes        when
 #   zram_tiered       zram_stock             lz4, cold pages recompressed with zstd /        boot
@@ -25,11 +26,19 @@
 #   caps              caps_off               schedutilmium caps 1 on policy3 and 7 / 0        now*
 #   mid_burst         mid_burst_off          policy3 caps_burst 1536000 / 0                   now*
 #   touch_floor       touch_floor_off        policy0 touch_floor 1344000 / 0                  now*
-#   place_em          place_em_off           k618_place em 1 (measured energy model) / 0      now
+#   hal_little        hal_little_off         the perf HAL's tap / scroll / drag / large-       boot,
+#                                            composition hints without their middle and prime  now
+#                                            floors (perfhal.sh) / the vendor's table
+#   sbs_off           sbs_stock              MIUI's SchedBoostService off: no real-time,       boot
+#                                            middle-and-prime-bound UI threads and no perf
+#                                            locks at each swipe / the phone's own
 #   place_rt          place_rt_off           k618_place rt 1 / 0                              now
 #   place_pull        place_pull_off         k618_place pull 1 / 0                            now
 #   place_slice       place_slice_off        k618_place slice 1 / 0                           now
 #   place_sync        place_sync_off         k618_place sync 1 / 0                            now
+#   place_em          place_em_on (SW_ASKED) k618_place em 1, the measured energy model / 0,   now
+#                                            the device tree's (Qualcomm's), the kernel's own
+#                                            default -- off unless its file is there
 #   look_around       look_around_off        vm.look_around 1 / 0                             now
 #   kswapd_mid        kswapd_mid_off         vm.kswapd_mid 1 / 0                              now
 #   kcompressd        kcompressd_off         vm.kcompressd 2 / 0                              now
@@ -54,9 +63,11 @@ kill_reap:kill_reap_off:now throttle_exempt:throttle_off:now erofs_prio:erofs_pr
 loop_hipri:loop_hipri_off:boot fence_names:fence_names_on:now wl_blocker:wl_blocker_off:now
 wl_untimed:wl_untimed_off:now alarm_hold:alarm_hold_off:now verity_cache:verity_cache_off:now
 gov_mium:gov_stock:now caps:caps_off:now mid_burst:mid_burst_off:now touch_floor:touch_floor_off:now
-place_em:place_em_off:now place_rt:place_rt_off:now place_pull:place_pull_off:now
-place_slice:place_slice_off:now place_sync:place_sync_off:now
+hal_little:hal_little_off:now sbs_off:sbs_stock:boot place_rt:place_rt_off:now place_pull:place_pull_off:now
+place_slice:place_slice_off:now place_sync:place_sync_off:now place_em:place_em_on:now
 look_around:look_around_off:now kswapd_mid:kswapd_mid_off:now kcompressd:kcompressd_off:now"
+# off unless their file is there: place_em (the measured table sends more tasks to the prime)
+SW_ASKED="place_em"
 
 sw_file() {
     for s in $SWITCHES; do
@@ -65,15 +76,22 @@ sw_file() {
     return 1
 }
 
-# sw_on <name>: 0 when the switch is on (its file is absent)
+sw_asked() {	# sw_asked <name>: 0 when the switch is off unless its file is there
+    case " $SW_ASKED " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# sw_on <name>: 0 when the switch is on (its file is absent; for SW_ASKED, there)
 sw_on() {
     f=$(sw_file "$1") || return 1
-    [ ! -e "$f" ]
+    if sw_asked "$1"; then [ -e "$f" ]; else [ ! -e "$f" ]; fi
 }
 
 sw_set() {	# sw_set <name> 1|0
     f=$(sw_file "$1") || return 1
-    if [ "$2" = 1 ]; then rm -f "$f"; else : > "$f"; fi
+    if sw_asked "$1"; then
+        if [ "$2" = 1 ]; then : > "$f"; else rm -f "$f"; fi
+    elif [ "$2" = 1 ]; then rm -f "$f"; else : > "$f"; fi
 }
 
 # a number chosen in the WebUI, or the kernel's default
@@ -133,9 +151,35 @@ sw_apply_mium() {
     if sw_on touch_floor; then w 1344000 $CF/policy0/$m/touch_floor; else w 0 $CF/policy0/$m/touch_floor; fi
 }
 
+# The switch "sbs_off": MIUI's SchedBoostService in
+# system_server off. While an interface animates -- a touch, a swipe, the shade, an app that starts --
+# it makes the app's main thread and RenderThread real-time and binds them to
+# persist.sys.miui_animator_sched.bigcores (3-7 on the port: the prime included; seen with a probe
+# on sched_setaffinity, Douyin's two threads at every swipe), and takes perf locks (little and
+# middle at 1785 MHz or more for ~0.4-0.6 s). k618_place leaves a draw thread made real-time to the
+# kernel's own RT placement, which takes any idle CPU of that mask -- often the prime. The service
+# reads persist.sys.sched_boost_enable (true unless set) and persist.sys.sched_boost_cloud_enable
+# (false: the cloud's setting may turn it on again) once, when system_server starts: sw_apply_boot
+# puts both in memory before that, sw_sbs_store keeps them for later boots -- on: false and true;
+# off: the phone's true and false. It takes the next boot.
+sw_sbs_store() {
+    if sw_on sbs_off; then
+        setprop persist.sys.sched_boost_enable false 2> /dev/null
+        setprop persist.sys.sched_boost_cloud_enable true 2> /dev/null
+    else
+        setprop persist.sys.sched_boost_enable true 2> /dev/null
+        setprop persist.sys.sched_boost_cloud_enable false 2> /dev/null
+    fi
+    return 0
+}
+
 # the switches zram and the loop devices read when they are set up (post-fs-data.sh: HyperOS
-# sets zram up later, at system_perf_init)
+# sets zram up later, at system_perf_init), and the properties system_server reads at its start
 sw_apply_boot() {
+    if sw_on sbs_off; then
+        resetprop -n persist.sys.sched_boost_enable false 2> /dev/null
+        resetprop -n persist.sys.sched_boost_cloud_enable true 2> /dev/null
+    fi
     if sw_on loop_hipri; then w Y $P/loop/parameters/hipri_wq; else w N $P/loop/parameters/hipri_wq; fi
     w "$(sw_num zram_mb 16384)" $Z/disksize_mb
     if sw_on zram_tiered; then

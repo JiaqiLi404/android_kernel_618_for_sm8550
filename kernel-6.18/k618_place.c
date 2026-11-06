@@ -13,7 +13,9 @@
  *   slice=1  draw threads get an EEVDF slice of slice_us instead of the base slice
  *   sync=1   a sync wake-up sent from a middle or prime CPU loses its hint when the task woken fits a
  *            little core
- *   em=1     the measured energy model (k618_place_em.py); em=0 puts the device tree's back
+ *   em=0     the device tree's energy model, the one Qualcomm's 5.15 kernel registered from the same
+ *            coefficients and voltages (the default); em=1 the measured one (k618_place_em.py)
+ *   diag=0   with diag=1, counters for phone A/Bs: where wake-ups land and how long EAS was off
  *
  * A "draw thread" is a thread of a process in the cpuset top-app (or in a cpuset made inside it) that is
  * the process's main thread or HWUI's RenderThread: the two threads that produce an app's frames.
@@ -82,6 +84,20 @@
  *     registered marks are kept and cpufreq's table is put back as it was, so the frequency governor
  *     chooses among the same OPPs as before -- the measured knee (little 441-902 MHz within 3 %) is
  *     too flat for that call. No cost after the swap: EAS reads whichever table is in force.
+ *     Off by default. EAS prices a task by cost x utilisation and takes the cheapest CPU that
+ *     fits; with the measured table the prime at its low steps is cheaper than the middle cluster
+ *     from ~1.79 GHz up (the device tree's: from ~2.19 GHz), so whenever one middle CPU runs a
+ *     heavy thread, small tasks go to the prime. The device tree's table also prices what the
+ *     measurements leave out (waking the prime, its cluster).
+ *
+ * (6) diag -- probes on two scheduler tracepoints, registered only while diag=1 (no cost at 0):
+ *     sched_wakeup (the task is on the queue of the CPU it woke on: counted by that CPU's cluster,
+ *     and by whether the system was overutilized then, by RT and by draw thread) and
+ *     sched_overutilized_tp (fired when a CPU tips the root domain over and at every root-level
+ *     load balance: the time spent overutilized). While the root domain is overutilized EAS is
+ *     skipped altogether: a wake-up takes the first idle CPU that fits from its previous one on
+ *     (select_idle_capacity()) and load balancing spreads tasks -- the prime included. The state
+ *     file then also says whether EAS is on at all (the root domain has performance domains).
  *
  * Hooks, and the vendor modules of the boot image that hold restricted ones: cameramsger has
  * android_rvh_sched_newidle_balance (ours is the second and last slot; its probe only sets "done" on
@@ -113,8 +129,10 @@
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/timekeeping.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
+#include <trace/events/sched.h>
 #include <trace/hooks/cgroup.h>
 #include <trace/hooks/sched.h>
 
@@ -130,8 +148,9 @@ static bool pull_down;
 static bool slice = true;
 static unsigned int slice_us = 1000;
 static bool sync = true;
-static unsigned int em = 1;
+static unsigned int em;
 static bool em_ineff;
+static bool diag;
 static char test_comm[TASK_COMM_LEN];
 
 static DEFINE_STATIC_KEY_FALSE(k618_rt_key);
@@ -1156,6 +1175,166 @@ static void k618_em_param(void)
 	mutex_unlock(&k618_em_lock);
 }
 
+/* ---------------------------------------------------------------- (6) diag */
+
+struct k618_dstat {
+	unsigned long wakes[K618_NR_CL];	/* wake-ups that landed on each cluster */
+	unsigned long wakes_ou[K618_NR_CL];	/* ... of them while overutilized (EAS skipped) */
+	unsigned long wakes_rt[K618_NR_CL];	/* ... of them RT (or deadline) tasks */
+	unsigned long wakes_draw[K618_NR_CL];	/* ... of them draw threads */
+};
+static DEFINE_PER_CPU(struct k618_dstat, k618_dstat);
+
+/* the root domain's overutilized flag as last seen, since when, the time spent so in all */
+static bool k618_ou_now;
+static u64 k618_ou_since, k618_ou_ns;
+static unsigned long k618_ou_flips;
+static DEFINE_RAW_SPINLOCK(k618_ou_lock);
+static bool k618_diag_in;		/* the probes are registered */
+static DEFINE_MUTEX(k618_diag_lock);
+
+/*
+ * set_rd_overutilized(): fired with the same value at every root-level load balance, so only a
+ * change takes the (leaf) lock. One root domain on the phone: Android's cpusets keep load balancing.
+ */
+static void k618_ou_probe(void *unused, struct root_domain *rd, bool ou)
+{
+	unsigned long flags;
+
+	if (READ_ONCE(k618_ou_now) == ou)
+		return;
+	raw_spin_lock_irqsave(&k618_ou_lock, flags);
+	if (k618_ou_now != ou) {
+		u64 now = ktime_get_mono_fast_ns();
+
+		if (ou) {
+			k618_ou_since = now;
+			k618_ou_flips++;
+		} else {
+			k618_ou_ns += now - k618_ou_since;
+		}
+		WRITE_ONCE(k618_ou_now, ou);
+	}
+	raw_spin_unlock_irqrestore(&k618_ou_lock, flags);
+}
+
+/*
+ * ttwu_do_wakeup(): the task is on the queue of the CPU it woke on, that queue locked and interrupts
+ * off -- but for a task that wakes itself, where only preemption is off: an interrupt's wake-up in
+ * between can lose a count, which does not matter here
+ */
+static void k618_wake_probe(void *unused, struct task_struct *p)
+{
+	struct k618_dstat *s = raw_cpu_ptr(&k618_dstat);
+	struct cgroup *top = READ_ONCE(k618_top);
+	int c = k618_cl_of[task_cpu(p)];
+
+	s->wakes[c]++;
+	if (READ_ONCE(k618_ou_now))
+		s->wakes_ou[c]++;
+	if (p->prio < MAX_RT_PRIO)
+		s->wakes_rt[c]++;
+	else if (k618_looks(top) && k618_draws(p, top))
+		s->wakes_draw[c]++;
+}
+
+/* the root domain's flag now, so that the time counts from the probes' start */
+static void k618_ou_sync(void)
+{
+	unsigned long flags;
+	bool ou;
+
+	rcu_read_lock();
+	ou = READ_ONCE(cpu_rq(raw_smp_processor_id())->rd->overutilized);
+	rcu_read_unlock();
+	raw_spin_lock_irqsave(&k618_ou_lock, flags);
+	if (k618_ou_now && !ou)
+		k618_ou_ns += ktime_get_mono_fast_ns() - k618_ou_since;
+	else if (!k618_ou_now && ou)
+		k618_ou_since = ktime_get_mono_fast_ns();
+	WRITE_ONCE(k618_ou_now, ou);
+	raw_spin_unlock_irqrestore(&k618_ou_lock, flags);
+}
+
+static void k618_diag_set(bool on)
+{
+	mutex_lock(&k618_diag_lock);
+	if (on && !k618_diag_in) {
+		int r1, r2;
+
+		k618_ou_sync();
+		r1 = register_trace_sched_overutilized_tp(k618_ou_probe, NULL);
+		r2 = register_trace_sched_wakeup(k618_wake_probe, NULL);
+		if (r1 || r2) {
+			pr_err("diag: probes refused (overutilized %d, wakeup %d)\n", r1, r2);
+			if (!r1)
+				unregister_trace_sched_overutilized_tp(k618_ou_probe, NULL);
+			if (!r2)
+				unregister_trace_sched_wakeup(k618_wake_probe, NULL);
+			tracepoint_synchronize_unregister();
+		} else {
+			k618_diag_in = true;
+		}
+	} else if (!on && k618_diag_in) {
+		unregister_trace_sched_overutilized_tp(k618_ou_probe, NULL);
+		unregister_trace_sched_wakeup(k618_wake_probe, NULL);
+		tracepoint_synchronize_unregister();
+		k618_diag_in = false;
+		/* (a stretch still open is closed: the time counts only while the probes run) */
+		raw_spin_lock_irq(&k618_ou_lock);
+		if (k618_ou_now)
+			k618_ou_ns += ktime_get_mono_fast_ns() - k618_ou_since;
+		WRITE_ONCE(k618_ou_now, false);
+		raw_spin_unlock_irq(&k618_ou_lock);
+	}
+	mutex_unlock(&k618_diag_lock);
+}
+
+/* the diag lines of the state file */
+static int k618_diag_state(char *buf, int n)
+{
+	struct k618_dstat s = {};
+	unsigned long flags, flips;
+	bool eas;
+	u64 ns;
+	int cpu, c;
+
+	for_each_possible_cpu(cpu) {
+		struct k618_dstat *d = per_cpu_ptr(&k618_dstat, cpu);
+
+		for (c = 0; c < K618_NR_CL; c++) {
+			s.wakes[c] += READ_ONCE(d->wakes[c]);
+			s.wakes_ou[c] += READ_ONCE(d->wakes_ou[c]);
+			s.wakes_rt[c] += READ_ONCE(d->wakes_rt[c]);
+			s.wakes_draw[c] += READ_ONCE(d->wakes_draw[c]);
+		}
+	}
+	raw_spin_lock_irqsave(&k618_ou_lock, flags);
+	ns = k618_ou_ns + (k618_ou_now ? ktime_get_mono_fast_ns() - k618_ou_since : 0);
+	flips = k618_ou_flips;
+	raw_spin_unlock_irqrestore(&k618_ou_lock, flags);
+	rcu_read_lock();
+	eas = rcu_dereference(cpu_rq(raw_smp_processor_id())->rd->pd) != NULL;
+	rcu_read_unlock();
+
+	n += sysfs_emit_at(buf, n, "diag %d\neas %s\noverutil_ms %llu\noverutil_flips %lu\n",
+			   READ_ONCE(k618_diag_in), eas ? "on" : "off", div_u64(ns, NSEC_PER_MSEC), flips);
+	n += sysfs_emit_at(buf, n, "wakes");
+	for (c = 0; c < k618_ncl; c++)
+		n += sysfs_emit_at(buf, n, " %lu", s.wakes[c]);
+	n += sysfs_emit_at(buf, n, "\nwakes_ou");
+	for (c = 0; c < k618_ncl; c++)
+		n += sysfs_emit_at(buf, n, " %lu", s.wakes_ou[c]);
+	n += sysfs_emit_at(buf, n, "\nwakes_rt");
+	for (c = 0; c < k618_ncl; c++)
+		n += sysfs_emit_at(buf, n, " %lu", s.wakes_rt[c]);
+	n += sysfs_emit_at(buf, n, "\nwakes_draw");
+	for (c = 0; c < k618_ncl; c++)
+		n += sysfs_emit_at(buf, n, " %lu", s.wakes_draw[c]);
+	n += sysfs_emit_at(buf, n, "\n");
+	return n;
+}
+
 /* ---------------------------------------------------------------- parameter plumbing */
 
 static void k618_key(struct static_key_false *key, bool on)
@@ -1183,6 +1362,8 @@ static void k618_changed(const struct kernel_param *kp)
 		k618_slice_all();
 	if (kp->arg == &em || kp->arg == &em_ineff)
 		k618_em_param();
+	if (kp->arg == &diag)
+		k618_diag_set(READ_ONCE(diag));
 }
 
 static int k618_set_bool(const char *val, const struct kernel_param *kp)
@@ -1242,9 +1423,11 @@ module_param_cb(slice_us, &k618_uint_ops, &slice_us, 0644);
 module_param_cb(sync, &k618_bool_ops, &sync, 0644);
 MODULE_PARM_DESC(sync, "no sync wake-up from a middle / prime CPU for a task that fits a little one");
 module_param_cb(em, &k618_uint_ops, &em, 0644);
-MODULE_PARM_DESC(em, "CPU energy model: 0 device tree, 1 measured");
+MODULE_PARM_DESC(em, "CPU energy model: 0 device tree (Qualcomm's, default), 1 measured");
 module_param_cb(em_ineff, &k618_bool_ops, &em_ineff, 0644);
 MODULE_PARM_DESC(em_ineff, "let the measured model's inefficient OPPs be skipped by EAS and cpufreq");
+module_param_cb(diag, &k618_bool_ops, &diag, 0644);
+MODULE_PARM_DESC(diag, "count wake-ups by cluster and the time EAS was off (overutilized); 0: no probes");
 module_param_cb(test_comm, &k618_comm_ops, test_comm, 0644);
 MODULE_PARM_DESC(test_comm, "QEMU test only: a task of this name counts as a draw thread");
 
@@ -1280,7 +1463,7 @@ static int k618_get_state(char *buf, const struct kernel_param *kp)
 	n += sysfs_emit_at(buf, n, "em %s\nem_domains %d\nem_swaps %ld\n",
 			   k618_em_now < 0 ? "not set" : k618_em_now ? "measured" : "device tree",
 			   k618_npd, atomic_long_read(&k618_em_swaps));
-	return n;
+	return k618_diag_state(buf, n);
 }
 
 static int k618_get_em_table(char *buf, const struct kernel_param *kp)
@@ -1361,14 +1544,16 @@ static int __init k618_place_init(void)
 	k618_keys();
 	if (READ_ONCE(slice) && k618_have_slice)
 		k618_slice_all();
+	if (READ_ONCE(diag))
+		k618_diag_set(true);
 
 	INIT_DELAYED_WORK(&k618_em_work, k618_em_workfn);
 	schedule_delayed_work(&k618_em_work, 0);
 
-	pr_info("%d clusters (capacity %lu..%lu); rt %d pull %d (%u us%s) slice %d (%u us) sync %d em %u\n",
+	pr_info("%d clusters (capacity %lu..%lu); rt %d pull %d (%u us%s) slice %d (%u us) sync %d em %u diag %d\n",
 		k618_ncl, k618_cl_cap[0], k618_cl_cap[k618_ncl - 1], rt && k618_have_rt,
 		pull && k618_have_pull, pull_wait_us, pull_down ? ", down" : "", slice && k618_have_slice,
-		slice_us, sync && k618_have_sync, em);
+		slice_us, sync && k618_have_sync, em, diag);
 	/*
 	 * Always 0: a restricted hook that went in cannot come out again, so the module must stay even
 	 * when some hook was refused (that part then stays off).

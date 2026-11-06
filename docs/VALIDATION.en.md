@@ -41,7 +41,7 @@ The table records the last complete run (bootstrap, build, `verify` and the QEMU
 |:--|:--|
 | Independent upstream reconstruction | **Passed**: 15 repositories, two vendor refs, six partitions and 54 module hashes ([record](../provenance/input-validation.json)) |
 | Source compilation | **Passed**: GKI, 249/249 SoC modules, 30/30 Techpack groups, RPC/EVA, touch/THP, CS35L41 and the ToF module |
-| Final modules and ABI | **406 modules, 21,230 versioned kernel imports; all 23,310 versioned imports checked against the module or kernel that provides each symbol**; no CRC mismatches or unresolved depmod errors |
+| Final modules and ABI | **406 modules, 21,239 versioned kernel imports; all 23,319 versioned imports checked against the module or kernel that provides each symbol**; no CRC mismatches or unresolved depmod errors |
 | Embedded-initramfs kernel | 18,008 vmlinux export CRCs match the base GKI; the built-in layer equals the boot ramdisk (418 entries, module layer only) and INITRAMFS_FORCE is off |
 | boot/AnyKernel3 consistency | Kernel, compressed ramdisk and all 17 command-line entries/order match; ZIP and required-list checks pass |
 | Installer emulation † | Previous tree: Horizon/slot A and recovery/slot B pass; inactive slot unchanged. Not re-run (see above); the installer script itself is unchanged apart from its command-line list, which the packer checks against the image |

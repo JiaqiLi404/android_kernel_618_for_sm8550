@@ -16,7 +16,7 @@ The entry compiles GKI, SoC, Techpack and device modules, generates matching ram
 |:--|:--|
 | `dist/release/boot.img` | Kernel with the module layer built in, and the same layer as its ramdisk, for fastboot |
 | `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` | Kernel installer for a compatible flashing tool/recovery |
-| `dist/release/nuwa-618-v4.zip` | Optional KernelSU module to control kernel settings |
+| `dist/release/nuwa-618-v5.zip` | Optional KernelSU module to control kernel settings |
 | `dist/release/validation.json`, `SHA256SUMS` | Validation result and artifact hashes |
 | `logs/release/build.log` | Build log; investigate the first error if a stage fails |
 
@@ -64,7 +64,7 @@ Temporary boot does not flash boot; Android still writes user data and this kern
 | Horizon Kernel Flasher / compatible recovery | Install `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` |
 | Bootloader fastboot | Confirm the active slot, run `fastboot flash boot dist/release/boot.img`, then `fastboot reboot` |
 
-Keep the kernel, ramdisk and modules matched; retain the replacement ramdisk inside the AnyKernel3 ZIP. The vendor_boot/init_boot ramdisk, or the recovery ramdisk (for example TWRP), still runs with this kernel; only the module files and lists come from the module layer. Install the optional `nuwa-618-v4.zip` separately through KernelSU's module interface; its scheduling page switches the governor, the placement rules and the reclaim changes one by one (off restores 6.18's stock behaviour).
+Keep the kernel, ramdisk and modules matched; retain the replacement ramdisk inside the AnyKernel3 ZIP. The vendor_boot/init_boot ramdisk, or the recovery ramdisk (for example TWRP), still runs with this kernel; only the module files and lists come from the module layer. Install the optional `nuwa-618-v5.zip` separately through KernelSU's module interface; its scheduling page switches the governor, the placement rules and the reclaim changes one by one (off restores 6.18's stock behaviour).
 
 <a id="usage-notes"></a>
 

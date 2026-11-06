@@ -122,7 +122,7 @@
 </div>
 
 <div id="tab-sched" hidden>
-<p class="note">开 = 内核的默认，关 = 6.18 原版。每一项都能单独关掉对比耗电和流畅。</p>
+<p class="note">开 = 内核的默认，关 = 6.18 原版（"默认关"的那项相反）。每一项都能单独关掉对比耗电和流畅。</p>
 <div class="card">
   <h2>调频</h2>
   <div class="row"><div class="text"><b>schedutilmium</b><small>5.15 上用的调频器，按忙闲比调频（关：原版 schedutil）</small><small class="live" id="live-gov"></small></div>
@@ -135,9 +135,14 @@
     <input type="checkbox" class="switch" data-sw="touch_floor"></div>
 </div>
 <div class="card">
+  <h2>厂商提频</h2>
+  <div class="row"><div class="text"><b>性能 HAL 只提小核</b><small>点按、滑动、大合成不再抬中核和超大核的下限（如合成时中核 1500）</small><small class="live" id="live-hal"></small></div>
+    <input type="checkbox" class="switch" data-sw="hal_little"></div>
+  <div class="row" data-boot><div class="text"><b>关掉 SchedBoostService</b><small>滑动时不再把界面线程设成实时、绑到中核和超大核</small><small class="live" id="live-sbs"></small></div>
+    <input type="checkbox" class="switch" data-sw="sbs_off"></div>
+</div>
+<div class="card">
   <h2>选核</h2>
-  <div class="row"><div class="text"><b>实测能量表</b><small>按本机实测功耗选核（关：设备树的表）</small></div>
-    <input type="checkbox" class="switch" data-sw="place_em"></div>
   <div class="row"><div class="text"><b>实时任务先放小核</b><small>也不放到正在画帧的核上</small></div>
     <input type="checkbox" class="switch" data-sw="place_rt"></div>
   <div class="row"><div class="text"><b>排队的画帧线程拉到空闲核</b><small>等了 2 ms 就拉到同簇的空闲核</small></div>
@@ -146,6 +151,8 @@
     <input type="checkbox" class="switch" data-sw="place_slice"></div>
   <div class="row"><div class="text"><b>大核唤醒不带同步提示</b><small>放得进小核的任务不被拉到唤醒者的大核上</small></div>
     <input type="checkbox" class="switch" data-sw="place_sync"></div>
+  <div class="row"><div class="text"><b>实测能量表</b><small>按本机实测功耗选核，会把更多任务放到超大核；默认关（用高通的表）</small></div>
+    <input type="checkbox" class="switch" data-sw="place_em"></div>
 </div>
 <div class="card">
   <h2>回收</h2>
@@ -297,11 +304,18 @@ async function load() {
   document.getElementById("wl-default").textContent = "内置名单：" + (s.wl_default || "（关）");
   kv("kv-standby", [["挂起成功", s.suspend_ok], ["挂起失败", s.suspend_fail], ["整机深度睡眠", s.aosd ? s.aosd + " 次" : ""]]);
   document.getElementById("live-gov").textContent = s.gov0 ? "现在：" + [s.gov0, s.gov3, s.gov7].join(" / ") : "";
+  const hal = (s.hal || "").split(" ");
+  document.getElementById("live-hal").textContent = { on: "已生效，改了 " + (hal[1] || "?") + " 处",
+    unlabelled: "没生效：副本标签不对", off: "", none: "这台没有性能 HAL 的表" }[hal[0]] || "";
+  document.getElementById("live-sbs").textContent = s.sbs_now === "false" ? "现在：已关" : s.sbs_now ? "现在：开着" : "";
   kv("kv-sched", [
     ["调频器（小 / 中 / 超大）", [s.gov0, s.gov3, s.gov7].filter(Boolean).join(" / ")],
     ["中核天花板", s.caps3], ["超大核天花板", s.caps7],
-    ["能量表", s.place_em ? ({ measured: "实测", "device tree": "设备树", "not set": "还没换" }[s.place_em] || s.place_em) +
+    ["能量表", s.place_em ? ({ measured: "实测", "device tree": "高通（设备树）", "not set": "还没找到" }[s.place_em] || s.place_em) +
       (s.place_em_domains ? "，" + s.place_em_domains + " 簇" : "") : ""],
+    ["按能耗选核（EAS）", s.place_eas ? (s.place_eas === "on" ? "开" : "关") : ""],
+    ["EAS 停用（过载）", s.place_diag === "1" ? s.place_overutil_ms + " ms，" + s.place_overutil_flips + " 次" : ""],
+    ["唤醒落点 小 / 中 / 超大", s.place_diag === "1" && s.place_wakes ? s.place_wakes.split(" ").join(" / ") : ""],
     ["前台识别", s.place_top_app ? ({ found: "已找到", "not yet": "还没找到" }[s.place_top_app] || s.place_top_app) : ""],
     ["实时任务选核", s.place_rt_picks ? s.place_rt_picks + " 次，小核 " + s.place_rt_little + "，避开画帧核 " + s.place_rt_draw_skips : ""],
     ["画帧线程被拉走", s.place_pulls ? (Number(s.place_pulls) + Number(s.place_pulls_newidle || 0)) + " 次" : ""],

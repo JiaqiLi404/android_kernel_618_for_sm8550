@@ -41,7 +41,7 @@ bash scripts/run-limited.sh verify
 |:--|:--|
 | 独立上游输入重建 | **通过**：15 个仓库、2 个 vendor 引用、6 个分区、54 个模块哈希（[记录](../provenance/input-validation.json)） |
 | 源码编译 | **通过**：GKI、249 / 249 SoC 模块、30 / 30 Techpack 组，以及 RPC / EVA、触摸 / THP、CS35L41、ToF 模块 |
-| 最终模块与 ABI | **406 个模块、21,230 项内核版本化导入；全部 23,310 项版本化导入与提供该符号的模块或内核逐项核对**；无 CRC 不匹配或 depmod 未解析错误 |
+| 最终模块与 ABI | **406 个模块、21,239 项内核版本化导入；全部 23,319 项版本化导入与提供该符号的模块或内核逐项核对**；无 CRC 不匹配或 depmod 未解析错误 |
 | 内嵌 initramfs 内核 | 18,008 个 vmlinux 导出 CRC 与基础 GKI 一致；内置层与 boot ramdisk 相同（418 项，只有模块层），INITRAMFS_FORCE 关闭 |
 | boot / AnyKernel3 一致性 | 内核、压缩 ramdisk、17 项启动参数及顺序一致；ZIP 和必需清单检查通过 |
 | 安装器模拟 † | 上一版源码：Horizon / A 槽、recovery / B 槽均通过，另一槽不变。本次未重跑（见上）；安装脚本除启动参数列表外没有改动，打包时会逐项核对该列表与镜像一致 |

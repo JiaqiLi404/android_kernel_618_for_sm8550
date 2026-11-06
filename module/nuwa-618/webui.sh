@@ -10,6 +10,8 @@ M=${0%/*}
 # shellcheck disable=SC1091  # next to this script
 . "$M/switches.sh"
 . "$M/trial-guard.sh"
+# shellcheck disable=SC1091  # next to this script
+. "$M/perfhal.sh"
 
 p() { printf '%s=%s\n' "$1" "$2"; }
 rl() { cat "$1" 2> /dev/null | head -n 1; }	# (not r: mksh has r as an alias of fc)
@@ -50,6 +52,9 @@ status() {
     for n in 0 3 7; do p "gov$n" "$(rl $CF/policy$n/scaling_governor)"; done
     p caps3 "$(rl $CF/policy3/schedutilmium/caps_state)"
     p caps7 "$(rl $CF/policy7/schedutilmium/caps_state)"
+    # the perf HAL's table -- "on N" (our copy, N hints edited), "unlabelled N", "off", "none"
+    p hal "$(perfhal_status)"
+    p sbs_now "$(getprop persist.sys.sched_boost_enable)"
     [ -r $PL/state ] && awk '{ k = $1; $1 = ""; sub(/^ /, ""); printf "place_%s=%s\n", k, $0 }' $PL/state 2> /dev/null
     p look_around_skipped "$(rl /proc/sys/vm/look_around_skipped)"
     p kcompressd_pages "$(rl /proc/sys/vm/kcompressd_pages)"
@@ -82,6 +87,9 @@ case "$1" in
         guard_schedule "$f"
         sw_apply_now
         sw_apply_gov
+        # the perf HAL's table: the copy comes or goes, the HAL started again to read it
+        [ "$2" != hal_little ] || perfhal_apply restart || { echo "perf HAL table not changed"; exit 1; }
+        [ "$2" != sbs_off ] || sw_sbs_store
         ;;
     num)
         case "$3" in ''|*[!0-9]*) echo "bad number"; exit 1;; esac

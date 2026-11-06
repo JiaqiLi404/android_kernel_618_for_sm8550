@@ -16,7 +16,7 @@ bash scripts/run-limited.sh build
 |:--|:--|
 | `dist/release/boot.img` | 内置模块层的内核，ramdisk 为同一模块层，可用于 fastboot |
 | `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` | 兼容刷写工具 / recovery 的内核安装包 |
-| `dist/release/nuwa-618-v4.zip` | 可选 KernelSU 调优模块，控制内核设置 |
+| `dist/release/nuwa-618-v5.zip` | 可选 KernelSU 调优模块，控制内核设置 |
 | `dist/release/validation.json`、`SHA256SUMS` | 校验结果与产物哈希 |
 | `logs/release/build.log` | 构建日志；失败时从首个错误排查 |
 
@@ -64,7 +64,7 @@ fastboot boot dist/release/boot.img
 | Horizon Kernel Flasher / 兼容 recovery | 安装 `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` |
 | Bootloader fastboot | 确认当前槽位后，执行 `fastboot flash boot dist/release/boot.img`，再 `fastboot reboot` |
 
-内核、ramdisk 与模块必须配套；保留 AnyKernel3 ZIP 中的替换 ramdisk。vendor_boot / init_boot 的 ramdisk，或 recovery（例如 TWRP）的 ramdisk 仍会随这个内核运行；只有模块文件和清单来自模块层。可选 `nuwa-618-v4.zip` 在 KernelSU 模块界面单独安装；其“调度”页可逐项开关调频器、选核规则和回收改动（关闭即恢复 6.18 原版行为）。
+内核、ramdisk 与模块必须配套；保留 AnyKernel3 ZIP 中的替换 ramdisk。vendor_boot / init_boot 的 ramdisk，或 recovery（例如 TWRP）的 ramdisk 仍会随这个内核运行；只有模块文件和清单来自模块层。可选 `nuwa-618-v5.zip` 在 KernelSU 模块界面单独安装；其“调度”页可逐项开关调频器、选核规则和回收改动（关闭即恢复 6.18 原版行为）。
 
 <a id="使用须知"></a>
 
