@@ -2,9 +2,9 @@
   "upstream_url": "https://github.com/OnePlusOSS/android_kernel_oneplus_sm8850.git",
   "upstream_revision": "fc30e54174d254ff7f33622a9278e4435f6718d2",
   "upstream_tree": "55a3bcd483dd2ada0d25ff5052c7352ae4525d90",
-  "target_tree": "d5cf4e9098bd06a475ed87c5927d596928042942",
+  "target_tree": "3ddaf72a978d520b5ce6aa5e25d5a21d13f9787f",
   "patch": "patches/soc-sm8550.patch",
-  "patch_sha256": "508525875bcc3665b3912c1e284d7c214c3ad2f78b2fba340c1034e5129ad421",
+  "patch_sha256": "b4d31f36754a27a8532117dcd092d00dac3eb8dc01a287dffc2b1c0f08fd2134",
   "additional_source": {
     "url": "https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git",
     "revision": "7fad87dc178d09489b74a714e4a525d56f546855"

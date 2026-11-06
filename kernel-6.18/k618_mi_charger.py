@@ -695,6 +695,18 @@ B_EDITS += [
      '\tcancel_delayed_work_sync(&bcdev->k618_panel_dw);\t/* k618 */\n\tif (bcdev->notifier_cookie)\n\t\tpanel_event_notifier_unregister(bcdev->notifier_cookie);\n\tcharger_unreg_notifier(&bcdev->charger_nb);\t/* k618 */\n'),
 ]
 
+# The wireless block (CONFIG_MI_WIRELESS=y in k618_overrides.bzl). Its 21 nodes, with the stock
+# module's XM numbers above, are the stock module's wireless nodes; only wls_bin_store differs:
+# fuxi's source prints one line per firmware byte the micharge HAL pushes, which the stock module
+# does not (its .rodata has the other four messages, not that one), and prints a size_t with %d.
+B_EDITS += [
+    ('\tstatic u8 fw_area = 0;\n\tint i;\n\n\tpr_err("buf:%s, count:%d\\n", buf, count);\n',
+     '\tstatic u8 fw_area = 0;\n\n\tpr_err("buf:%s, count:%zu\\n", buf, count);\n'),
+    ('\t}else {\n\t\tfor(i=0; i < count; ++i )\n'
+     '\t\t      pr_err("wls_bin_data[%d]=%x\\n",serial_number*MAX_STR_LEN+i,buf[i]);\n\n',
+     '\t}else {\n\t\t/* k618: no line per firmware byte, as the stock module */\n'),
+]
+
 # --mi-thermal: the unit k618_mi_thermal.c hands over (stock divides by 100)
 MI_THERMAL_EDITS = [
     ("\t\tret = k618_charger_notify_fn(MI_CHARGER_EVENT_BOARD_TEMP, millicelsius / 1000);\n",

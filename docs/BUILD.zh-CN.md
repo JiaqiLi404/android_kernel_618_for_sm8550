@@ -16,7 +16,7 @@ bash scripts/run-limited.sh build
 |:--|:--|
 | `dist/release/boot.img` | 内置模块层的内核，ramdisk 为同一模块层，可用于 fastboot |
 | `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` | 兼容刷写工具 / recovery 的内核安装包 |
-| `dist/release/nuwa-618-v3.zip` | 可选 KernelSU 调优模块，控制内核设置 |
+| `dist/release/nuwa-618-v4.zip` | 可选 KernelSU 调优模块，控制内核设置 |
 | `dist/release/validation.json`、`SHA256SUMS` | 校验结果与产物哈希 |
 | `logs/release/build.log` | 构建日志；失败时从首个错误排查 |
 
@@ -64,7 +64,17 @@ fastboot boot dist/release/boot.img
 | Horizon Kernel Flasher / 兼容 recovery | 安装 `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` |
 | Bootloader fastboot | 确认当前槽位后，执行 `fastboot flash boot dist/release/boot.img`，再 `fastboot reboot` |
 
-内核、ramdisk 与模块必须配套；保留 AnyKernel3 ZIP 中的替换 ramdisk。vendor_boot / init_boot 的 ramdisk，或 recovery（例如 TWRP）的 ramdisk 仍会随这个内核运行；只有模块文件和清单来自模块层。可选 `nuwa-618-v3.zip` 在 KernelSU 模块界面单独安装。
+内核、ramdisk 与模块必须配套；保留 AnyKernel3 ZIP 中的替换 ramdisk。vendor_boot / init_boot 的 ramdisk，或 recovery（例如 TWRP）的 ramdisk 仍会随这个内核运行；只有模块文件和清单来自模块层。可选 `nuwa-618-v4.zip` 在 KernelSU 模块界面单独安装；其“调度”页可逐项开关调频器、选核规则和回收改动（关闭即恢复 6.18 原版行为）。
+
+<a id="使用须知"></a>
+
+### 使用须知
+
+| 项目 | 说明 |
+|:--|:--|
+| root 管理器 | 内核内置 KernelSU v3.3.1（版本号 32680）与 SUSFS v2.3.0。内置的 KernelSU 只认官方 KernelSU 管理器的签名：KernelSU 分支版本的管理器会显示“未安装”，并提示用 LKM 方式安装。LKM 方式不适用于本内核：KernelSU 已编进内核，LKM 模块是给不带 KernelSU 的内核用的。请使用官方管理器；以前用 LKM 修补过 init_boot 的，最好刷回原厂 init_boot（不刷也能开机，只是每次开机加载旧模块都会失败）。 |
+| bootloader 徽标后黑屏 | 正常现象：从 bootloader 徽标到开机动画之间屏幕是黑的。启动参数带 `msm_drm.k618_cont_splash=0`，内核不接管 bootloader 点亮的屏幕，而是重新给面板上电、画出自己的第一帧。这样 `fastboot boot` 也能正常显示：那种启动方式下 bootloader 不留下亮着的屏幕可供接管。 |
+| 小米 13 的触摸 | 按触摸固件名（`st_fts_m3`）自动采用 13 原厂在指纹路径上的规则；`dmesg \| grep "fingerprint rules"` 可看到当前手机用的规则。 |
 
 ## 4 · 回退与排错
 

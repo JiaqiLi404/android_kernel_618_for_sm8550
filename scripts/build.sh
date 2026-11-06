@@ -29,5 +29,5 @@ cp "$K618/boot-test/boot-618-$TAG.img" "$PROJECT_ROOT/dist/$TAG/boot.img"
 run bash "$PROJECT_ROOT/tools/ak3/pack618.sh" "$PROJECT_ROOT/dist/$TAG/boot.img" "$PROJECT_ROOT/dist/$TAG/nuwa-kernel-6.18-AnyKernel3.zip"
 # an earlier version's tuning zip would otherwise enter SHA256SUMS through *.zip
 rm -f "$PROJECT_ROOT/dist/$TAG"/nuwa-618-v*.zip
-(cd "$PROJECT_ROOT/module/nuwa-618" && zip -qr9 "$PROJECT_ROOT/dist/$TAG/nuwa-618-v3.zip" .)
+(cd "$PROJECT_ROOT/module/nuwa-618" && zip -qr9 "$PROJECT_ROOT/dist/$TAG/nuwa-618-v4.zip" .)
 run bash "$PROJECT_ROOT/scripts/verify.sh"

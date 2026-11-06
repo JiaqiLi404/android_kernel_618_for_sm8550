@@ -88,7 +88,9 @@ k618_overrides_config = {
     "CONFIG_QTI_PMU_SCMI_CLIENT": "m",
     "CONFIG_QTI_C1DCVS_SCMI_CLIENT": "m",
     "CONFIG_QTI_HW_MEMLAT_SCMI_CLIENT": "m",
-
-
-
+    # The wireless half of Xiaomi's qti_battery_charger (k618_mi_charger.py): reverse charging, the
+    # wireless chip's firmware and state, and wlscharge_control_limit, which mi_thermald writes to
+    # limit wireless charging when hot (thermald-devices.conf) -- 21 nodes, the stock module's, with
+    # its XM numbers. It must be "y", not "m": the driver tests defined(CONFIG_MI_WIRELESS).
+    "CONFIG_MI_WIRELESS": "y",
 }

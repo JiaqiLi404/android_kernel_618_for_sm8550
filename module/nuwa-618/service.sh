@@ -8,4 +8,12 @@ MODDIR=${0%/*}
 guard_boot
 sw_apply_now
 [ -r "$A/nuwa_618_wl_user" ] && w "$(cat "$A/nuwa_618_wl_user")" "$WLB/wakelock_blocker"
+# the vendor's post-boot script sets every policy's governor late in the boot ("walt", which
+# is schedutilmium on k618), so the governor switches are applied once more after it
+(
+    i=0
+    while [ "$(getprop sys.boot_completed)" != 1 ] && [ $i -lt 300 ]; do sleep 2; i=$((i + 1)); done
+    sleep 20
+    sw_apply_gov
+) &
 exit 0

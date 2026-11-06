@@ -39,6 +39,10 @@ if [ "${THP:-1}" != 0 ]; then python3 -I $KD/drafts/k618_touch_thp.py $D || exit
 # the 13 and the 13 Ultra: THP as each node says (in k618_touch_thp.py), the 13 Ultra's second
 # interrupt pin chosen by board id as its stock driver does
 python3 -I $KD/k618_touch_devices.py $D || exit 1
+# The 13's stock touch modules are the m3 build of the source tree whose m2 build the 13 Pro runs:
+# its fingerprint-path rules, chosen from the node's firmware name (fts_touch_spi.k618_m3), and on
+# all three phones the THP-off command only for THP firmware (fts,support-thp-fw), as stock
+python3 -I $KD/k618_touch_m3.py $D || exit 1
 cat > $D/Kbuild <<'EOF'
 obj-m += xiaomi/ fts_spi/
 EOF
@@ -68,6 +72,8 @@ strings $D/fts_spi/fts_touch_spi.ko | grep -E '^depends=' | grep -qE '(=|,)panel
 	{ echo "k618_touch: fts_touch_spi does not import panel_event_notifier"; exit 1; }
 strings $D/fts_spi/fts_touch_spi.ko | grep -q "k618: flash write refused" ||
 	{ echo "k618_touch: the flash guard is missing"; exit 1; }
+strings $D/fts_spi/fts_touch_spi.ko | grep -q "fingerprint rules, THP-off command" ||
+	{ echo "k618_touch: the 13's touch rules (k618_touch_m3.py) are missing"; exit 1; }
 mkdir -p $K618/tpmods
 cp $D/fts_spi/fts_touch_spi.ko $D/xiaomi/xiaomi_touch.ko $K618/tpmods/ || exit 1
 echo "k618_touch: fts_touch_spi.ko $(stat -c %s $D/fts_spi/fts_touch_spi.ko) bytes, xiaomi_touch.ko $(stat -c %s $D/xiaomi/xiaomi_touch.ko) bytes -> $K618/tpmods/"

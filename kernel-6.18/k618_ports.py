@@ -1116,6 +1116,724 @@ done:
 ])
 
 
+# ---- look_around (OnePlus' memload_opt look_around, the classic-LRU counterpart of MGLRU's
+# lru_gen_look_around()). The phone runs the classic LRU on 6.18 too (lru_gen/enabled 0x0000), and
+# 6.18's reclaim still walks the mappings of each folio on the inactive list on its own, while the
+# pages next to one found in use were most likely used with it. Measured on the phone's 5.15 kernel
+# (1.5 GB taken past what was free, the switch alternated, two rounds each):
+# with it off kswapd used 2-3x the CPU, taking the memory took 30-50 % longer and one run fell into
+# direct reclaim (29,649 stalls, 92 background apps killed). 6.18 GKI calls android_vh_look_around
+# in the MGLRU branch of folio_referenced_one() only, so the classic branch gets the call 5.15 GKI
+# had there, ahead of its young-bit test; the other three hooks sit where 5.15 had them. The rest
+# is 5.15's code on 6.18's folios: the mark is again the bit just above the page flags (31 in this
+# build; bits 46-51 hold the 18 Pro Max's mi_mtmr.ko's own marks), the neighbours are read with
+# ptep_get() (arm64's contiguous PTEs) and aged with ptep_clear_young_notify() as MGLRU does, and a
+# decision taken ahead of the mark in folio_check_references() (mi_mtmr.ko's
+# page_should_be_protected) stands. As on 5.15 the folio being asked about lies in its own window:
+# it is marked too, so the next look at it activates it without a walk (this one set referenced).
+LA_VS = """/*
+ * k618 port look_around -- vm.look_around: when reclaim's walk over the mappings of a folio on
+ * the inactive list finds one of its PTEs young, the other PTEs of that page table around it (16
+ * in all, inside the PMD and the VMA) are aged in the same pass and the folios that were young
+ * there are marked; when reclaim later asks about one of them, the mark is its answer -- kept,
+ * or activated if it was referenced before -- without a walk of its own. The classic LRU's
+ * counterpart of MGLRU's lru_gen_look_around() (after OnePlus' memload_opt look_around),
+ * on GKI's own vendor hooks, registered only while the switch is on: android_vh_look_around
+ * (folio_referenced_one(), mm/rmap.c), android_vh_check_folio_look_around_ref
+ * (folio_check_references()), android_vh_test_clear_look_around_ref (prep_new_page()) and
+ * android_vh_look_around_migrate_folio (folio_migrate_flags()); no module this phone loads
+ * registers any of them. Nothing while MGLRU is on (it looks around itself), nothing in
+ * VM_SPECIAL or hugetlb mappings. vm.look_around_skipped: walks saved (a statistic: not exact).
+ *
+ * The mark: a PG_ flag cannot be added without changing the KMI, so it is the spare bit of
+ * folio->flags just above them, as on 5.15. Bits NR_PAGEFLAGS (30) to LRU_REFS_PGOFF - 1 (52)
+ * are unused in this build; the 18 Pro Max's mi_mtmr.ko keeps marks of its own in bits 46-51,
+ * and memory allocation profiling's compressed mode (only with "compressed" on the command line)
+ * keeps its tags in all of them: look_around stays off then.
+ */
+#define PG_look_around		(__NR_PAGEFLAGS + 1)
+#define MI_MTMR_FIRST_FLAG	46
+#define LOOK_AROUND_MAX		8	/* PTEs on either side of the young one */
+
+static int sysctl_look_around __read_mostly = 1;
+static unsigned long look_around_skipped;
+static DEFINE_MUTEX(look_around_lock);
+static bool look_around_on;
+
+/* a young neighbour: as MGLRU's walk_update_folio(), its PTEs' dirty bit goes to the folio */
+static void look_around_mark(struct folio *folio, struct vm_area_struct *vma, bool dirty)
+{
+	if (dirty && !folio_test_dirty(folio) &&
+	    !(folio_test_anon(folio) && folio_test_swapbacked(folio) &&
+	      !folio_test_swapcache(folio)))
+		folio_mark_dirty(folio);
+	if (!test_bit(PG_look_around, &folio->flags.f))
+		set_bit(PG_look_around, &folio->flags.f);
+	if (vma->vm_flags & VM_EXEC)
+		folio_set_referenced(folio);
+}
+
+/* the PTEs around the young one at pvmw->address, under its page table lock */
+static void look_around(struct page_vma_mapped_walk *pvmw, struct folio *folio)
+{
+	struct vm_area_struct *vma = pvmw->vma;
+	struct pglist_data *pgdat = folio_pgdat(folio);
+	unsigned long addr = pvmw->address, start, end;
+	struct folio *last = NULL;
+	bool dirty = false;
+	pte_t *pte;
+	int i;
+
+	lockdep_assert_held(pvmw->ptl);
+
+	start = max(addr & PMD_MASK, vma->vm_start);
+	end = min(addr | ~PMD_MASK, vma->vm_end - 1) + 1;
+	if (end - start > 2 * LOOK_AROUND_MAX * PAGE_SIZE) {
+		if (addr - start < LOOK_AROUND_MAX * PAGE_SIZE)
+			end = start + 2 * LOOK_AROUND_MAX * PAGE_SIZE;
+		else if (end - addr < LOOK_AROUND_MAX * PAGE_SIZE)
+			start = end - 2 * LOOK_AROUND_MAX * PAGE_SIZE;
+		else {
+			start = addr - LOOK_AROUND_MAX * PAGE_SIZE;
+			end = addr + LOOK_AROUND_MAX * PAGE_SIZE;
+		}
+	}
+	pte = pvmw->pte - (addr - start) / PAGE_SIZE;
+
+	arch_enter_lazy_mmu_mode();
+	for (i = 0, addr = start; addr != end; i++, addr += PAGE_SIZE) {
+		pte_t ptent = ptep_get(pte + i);
+		unsigned long pfn = pte_pfn(ptent);
+		struct folio *young;
+
+		if (!pte_present(ptent) || is_zero_pfn(pfn) || pte_special(ptent))
+			continue;
+		if (!pte_young(ptent) && !mm_has_notifiers(vma->vm_mm))
+			continue;
+		if (!pfn_valid(pfn) || pfn < pgdat->node_start_pfn ||
+		    pfn >= pgdat_end_pfn(pgdat))
+			continue;
+		young = pfn_folio(pfn);
+		if (folio_nid(young) != pgdat->node_id)
+			continue;
+		if (!ptep_clear_young_notify(vma, addr, pte + i))
+			continue;
+		if (young != last) {
+			if (last)
+				look_around_mark(last, vma, dirty);
+			last = young;
+			dirty = false;
+		}
+		if (pte_dirty(ptent))
+			dirty = true;
+	}
+	if (last)
+		look_around_mark(last, vma, dirty);
+	arch_leave_lazy_mmu_mode();
+}
+
+/* android_vh_look_around: a mapping of a folio reclaim asks about, its PTE in pvmw */
+static void look_around_probe(void *unused, struct page_vma_mapped_walk *pvmw,
+			      struct folio *folio, struct vm_area_struct *vma, int *referenced)
+{
+	if (lru_gen_enabled() || folio_test_active(folio) ||
+	    (vma->vm_flags & (VM_SEQ_READ | VM_RAND_READ | VM_SPECIAL | VM_HUGETLB)) ||
+	    !pte_young(ptep_get(pvmw->pte)))
+		return;
+	look_around(pvmw, folio);
+	*referenced += 1;
+}
+
+/* android_vh_check_folio_look_around_ref: seen in use by a neighbour's walk, no walk of its own */
+static void look_around_check_probe(void *unused, struct folio *folio, int *ret)
+{
+	/* a decision taken before (mi_mtmr.ko's page_should_be_protected) stands */
+	if (*ret || lru_gen_enabled() || !test_bit(PG_look_around, &folio->flags.f) ||
+	    !test_and_clear_bit(PG_look_around, &folio->flags.f))
+		return;
+	look_around_skipped++;
+	if (folio_test_referenced(folio)) {
+		*ret = FOLIOREF_ACTIVATE;
+	} else {
+		folio_set_referenced(folio);
+		*ret = FOLIOREF_KEEP;
+	}
+}
+
+/* android_vh_test_clear_look_around_ref: every page allocated -- a read, unless a mark is left */
+static void look_around_alloc_probe(void *unused, struct page *page)
+{
+	if (unlikely(test_bit(PG_look_around, &page->flags.f)))
+		clear_bit(PG_look_around, &page->flags.f);
+}
+
+/* android_vh_look_around_migrate_folio: the mark goes over as a reference */
+static void look_around_migrate_probe(void *unused, struct folio *old, struct folio *new)
+{
+	if (test_bit(PG_look_around, &old->flags.f) &&
+	    test_and_clear_bit(PG_look_around, &old->flags.f))
+		folio_set_referenced(new);
+}
+
+/* with look_around_lock held */
+static int look_around_set(bool on)
+{
+	int ret;
+
+	if (on == look_around_on)
+		return 0;
+	if (!on) {
+		unregister_trace_android_vh_look_around(look_around_probe, NULL);
+		unregister_trace_android_vh_check_folio_look_around_ref(look_around_check_probe,
+									NULL);
+		unregister_trace_android_vh_look_around_migrate_folio(look_around_migrate_probe,
+								      NULL);
+		unregister_trace_android_vh_test_clear_look_around_ref(look_around_alloc_probe,
+								       NULL);
+		look_around_on = false;
+		return 0;
+	}
+#ifdef CONFIG_MEM_ALLOC_PROFILING
+	if (static_key_enabled(&mem_profiling_compressed))
+		return -EBUSY;
+#endif
+	ret = register_trace_android_vh_test_clear_look_around_ref(look_around_alloc_probe, NULL);
+	if (ret)
+		goto out;
+	ret = register_trace_android_vh_look_around_migrate_folio(look_around_migrate_probe, NULL);
+	if (ret)
+		goto out_alloc;
+	ret = register_trace_android_vh_check_folio_look_around_ref(look_around_check_probe, NULL);
+	if (ret)
+		goto out_migrate;
+	ret = register_trace_android_vh_look_around(look_around_probe, NULL);
+	if (ret)
+		goto out_check;
+	look_around_on = true;
+	return 0;
+
+out_check:
+	unregister_trace_android_vh_check_folio_look_around_ref(look_around_check_probe, NULL);
+out_migrate:
+	unregister_trace_android_vh_look_around_migrate_folio(look_around_migrate_probe, NULL);
+out_alloc:
+	unregister_trace_android_vh_test_clear_look_around_ref(look_around_alloc_probe, NULL);
+out:
+	pr_err("look_around: vendor hooks not registered: %d\\n", ret);
+	return ret;
+}
+
+static int look_around_sysctl(const struct ctl_table *table, int write, void *buffer,
+			      size_t *lenp, loff_t *ppos)
+{
+	int ret;
+
+	mutex_lock(&look_around_lock);
+	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	if (!ret && write) {
+		ret = look_around_set(READ_ONCE(sysctl_look_around));
+		if (ret)
+			WRITE_ONCE(sysctl_look_around, look_around_on);
+	}
+	mutex_unlock(&look_around_lock);
+	return ret;
+}
+
+static const struct ctl_table look_around_sysctls[] = {
+	{
+		.procname	= "look_around",
+		.data		= &sysctl_look_around,
+		.maxlen		= sizeof(sysctl_look_around),
+		.mode		= 0644,
+		.proc_handler	= look_around_sysctl,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "look_around_skipped",
+		.data		= &look_around_skipped,
+		.maxlen		= sizeof(look_around_skipped),
+		.mode		= 0444,
+		.proc_handler	= proc_doulongvec_minmax,
+	},
+};
+
+static int __init look_around_init(void)
+{
+	/* under the fields packed at the top of folio->flags, and under mi_mtmr.ko's marks */
+	BUILD_BUG_ON(PG_look_around >= LRU_REFS_PGOFF);
+	BUILD_BUG_ON(PG_look_around >= MI_MTMR_FIRST_FLAG);
+
+	mutex_lock(&look_around_lock);
+	if (look_around_set(READ_ONCE(sysctl_look_around)))
+		WRITE_ONCE(sysctl_look_around, 0);
+	mutex_unlock(&look_around_lock);
+	register_sysctl_init("vm", look_around_sysctls);
+	return 0;
+}
+late_initcall(look_around_init);
+"""
+change("look_around", [
+    (RM, "\t\t} else if (pvmw.pte) {\n\t\t\tif (ptep_clear_flush_young_notify(vma, address,\n"
+     "\t\t\t\t\t\tpvmw.pte))\n\t\t\t\treferenced++;\n",
+     "\t\t} else if (pvmw.pte) {\n"
+     "\t\t\t/* k618 port look_around: the classic LRU's call of the hook (mm/vmscan.c) */\n"
+     "\t\t\ttrace_android_vh_look_around(&pvmw, folio, vma, &referenced);\n"
+     "\t\t\tif (ptep_clear_flush_young_notify(vma, address,\n"
+     "\t\t\t\t\t\tpvmw.pte))\n\t\t\t\treferenced++;\n", 1),
+    (VS, "#else\nstatic bool lru_gen_set_refs(struct folio *folio)\n{\n\treturn false;\n}\n"
+     "#endif /* CONFIG_LRU_GEN */\n",
+     "#else\nstatic bool lru_gen_set_refs(struct folio *folio)\n{\n\treturn false;\n}\n"
+     "#endif /* CONFIG_LRU_GEN */\n\n" + LA_VS, 1),
+])
+
+# ---- kswapd_mid + reclaim_cpus: kswapd and the kcompressd threads (below) on the middle clusters,
+# looked at again each time they are woken. Measured on the phone (its 5.15 kernel, twelve large
+# apps started in turn):
+# with kswapd on CPUs 3-6 instead of 0-3 (the ROM's system-background cpuset: the little cores and
+# one middle one), the twelve starts took 6.4-8.9 s against 10.4-11.7 s, 0.5 cold starts a round
+# against 3.5, 221 J against 267 J; measured again for cold starts, the starts and the energy were
+# equal, but the little cores needed 2-2.5x the CPU time per page reclaimed and the compositor,
+# which runs on them, missed 168-215 frames against 41 -> middle. On 6.18 kswapd may run on all 8
+# CPUs, and the kthread core puts it back there whenever a CPU comes online. Rewritten for 6.18:
+# the clusters come from the CPUs' capacities (5.15 read cpufreq's maximum frequencies through a
+# policy notifier; the grouping is the same here, before and after cpufreq is up), kswapd() lost
+# its node mask, and the perf HAL's placement through perf_helper's /proc/kswapd_c -- the cpuset
+# /dev/cpuset/kswapd, CPUs 0-7 -- holds the middle cluster (how the two meet: the comment below).
+KM_VS = """/*
+ * k618 port kswapd_mid -- vm.kswapd_mid, vm.reclaim_cpus: kswapd runs on the reclaim CPUs, looked
+ * at again each time it is woken, and so do the kcompressd threads that write its zram folios
+ * (mm/page_io.c) each time they wake, as on the phone's 5.15 kernel. Not on the little cores:
+ * there reclaim took 2-2.5x the CPU time per page and the compositor, which runs there, missed
+ * 168-215 frames against 41 while apps started; not on the fastest cluster, which the app in
+ * front wants.
+ *   vm.reclaim_cpus  1 the middle clusters (default), 2 the slowest cluster where there is a
+ *                    faster one, 0 no preference; told apart by CPU capacity (little 302, middle
+ *                    891, prime 1024 on this phone; with fewer than three kinds there is no
+ *                    middle cluster, and no preference)
+ *   vm.kswapd_mid    1 kswapd follows vm.reclaim_cpus (default); 0 back to the CPUs of its node
+ *                    that its cpuset allows
+ * A thread moves the next time it wakes. 6.18 lets kswapd run on every CPU of its node and puts it
+ * back there whenever a CPU comes online (kthreads_online_cpu()). This vendor's perf HAL, once
+ * /proc/kswapd_c is there (perf_helper.ko), writes kswapd's pid into /dev/cpuset/kswapd (CPUs 0-7,
+ * from init.target.rc) when it starts and whenever that node signals, and has a perflock that
+ * writes the cpuset's cpus. Each of these takes effect at once and holds until kswapd next wakes,
+ * when it is narrowed to the reclaim CPUs again: only kswapd moves itself here, and only when its
+ * CPUs differ, so the two never go back and forth; with vm.kswapd_mid 0 the cpuset decides.
+ */
+static int vm_reclaim_cpus __read_mostly = 1;
+static int vm_kswapd_mid __read_mostly = 1;
+
+/* the CPUs vm.reclaim_cpus @which names: none where there is no such cluster */
+static void reclaim_cpus_mask(int which, struct cpumask *mask)
+{
+	unsigned long cap, lo = ULONG_MAX, hi = 0;
+	int cpu;
+
+	cpumask_clear(mask);
+	if (which != 1 && which != 2)
+		return;
+	for_each_possible_cpu(cpu) {
+		cap = arch_scale_cpu_capacity(cpu);
+		lo = min(lo, cap);
+		hi = max(hi, cap);
+	}
+	for_each_possible_cpu(cpu) {
+		cap = arch_scale_cpu_capacity(cpu);
+		/* 1: strictly between the slowest and the fastest; 2: the slowest, with a faster one */
+		if (which == 1 ? (cap > lo && cap < hi) : (cap == lo && lo < hi))
+			cpumask_set_cpu(cpu, mask);
+	}
+}
+
+/* move the calling kernel thread onto the reclaim CPUs within @allowed, if it is not there */
+void reclaim_cpus_follow(const struct cpumask *allowed)
+{
+	cpumask_var_t want;
+
+	if (!alloc_cpumask_var(&want, GFP_KERNEL))
+		return;
+	reclaim_cpus_mask(READ_ONCE(vm_reclaim_cpus), want);
+	cpumask_and(want, want, allowed);
+	/* (active: a CPU that is paused is online, but takes no task) */
+	if (!cpumask_intersects(want, cpu_active_mask))
+		cpumask_copy(want, allowed);
+	if (!cpumask_equal(current->cpus_ptr, want))
+		set_cpus_allowed_ptr(current, want);
+	free_cpumask_var(want);
+}
+
+/* vm.kswapd_mid turned off: back to the CPUs of its node that its cpuset allows */
+static void kswapd_unfollow(const struct cpumask *node)
+{
+	cpumask_var_t mask;
+
+	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
+		return;
+	cpuset_cpus_allowed(current, mask);
+	if (!cpumask_and(mask, mask, node))
+		cpumask_copy(mask, node);
+	set_cpus_allowed_ptr(current, mask);
+	free_cpumask_var(mask);
+}
+
+/* each time kswapd is woken: onto the reclaim CPUs, or, switched off, back to its cpuset's */
+static void kswapd_place(pg_data_t *pgdat, bool *mid)
+{
+	const struct cpumask *node = cpumask_of_node(pgdat->node_id);
+
+	if (READ_ONCE(vm_kswapd_mid) && !cpumask_empty(node)) {
+		reclaim_cpus_follow(node);
+		*mid = true;
+	} else if (*mid) {
+		kswapd_unfollow(node);
+		*mid = false;
+	}
+}
+
+static const struct ctl_table kswapd_mid_sysctls[] = {
+	{
+		.procname	= "kswapd_mid",
+		.data		= &vm_kswapd_mid,
+		.maxlen		= sizeof(vm_kswapd_mid),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "reclaim_cpus",
+		.data		= &vm_reclaim_cpus,
+		.maxlen		= sizeof(vm_reclaim_cpus),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO,
+	},
+};
+
+static int __init kswapd_mid_sysctl_init(void)
+{
+	register_sysctl_init("vm", kswapd_mid_sysctls);
+	return 0;
+}
+late_initcall(kswapd_mid_sysctl_init);
+
+"""
+change("kswapd_mid", [
+    ("mm/internal.h", "void folio_rotate_reclaimable(struct folio *folio);\n",
+     "void folio_rotate_reclaimable(struct folio *folio);\n"
+     "void reclaim_cpus_follow(const struct cpumask *allowed);\t/* k618 port kswapd_mid, mm/vmscan.c */\n", 1),
+    (VS, "/*\n * The background pageout daemon, started as a kernel thread\n * from the init process.\n",
+     KM_VS + "/*\n * The background pageout daemon, started as a kernel thread\n * from the init process.\n", 1),
+    (VS, "\tpg_data_t *pgdat = (pg_data_t *)p;\n\tstruct task_struct *tsk = current;\n",
+     "\tpg_data_t *pgdat = (pg_data_t *)p;\n\tstruct task_struct *tsk = current;\n"
+     "\tbool mid = false;\t/* k618 port kswapd_mid */\n", 1),
+    (VS, "\t\ttrace_mm_vmscan_kswapd_wake(pgdat->node_id, highest_zoneidx,\n\t\t\t\t\t\talloc_order);\n",
+     "\t\tkswapd_place(pgdat, &mid);\t/* k618 port kswapd_mid */\n"
+     "\t\ttrace_mm_vmscan_kswapd_wake(pgdat->node_id, highest_zoneidx,\n\t\t\t\t\t\talloc_order);\n", 1),
+])
+
+# ---- kcompressd (the kcompressd proposal posted to linux-mm in 2025). zram compresses inside the
+# write call, so kswapd scans and unmaps a batch and then compresses every anon page of it itself
+# before it can go on; with vm.kcompressd it hands them
+# to per-node threads and carries on. Measured on 5.15 with 2 threads (the performance default):
+# memory made free a quarter faster; with the second pass, what stayed twice -- in RAM and in zram
+# -- after a round of making room went from 40-47 MB to none (x86-64 test machine, every page mapped
+# five times) and the phone's rotated pages from 63 % of those swapped out to 8 %. Rewritten for
+# 6.18's folio swap-out path: kswapd's anon folio reaches swap_writeout() (mm/page_io.c) after the
+# zero-fill and zswap steps, and is queued where 6.18 would call __swap_writepage(); only to a device
+# whose writes are synchronous (6.18 splits SWP_SYNCHRONOUS_IO in two: __SWP_WRITE_SYNCHRONOUS_IO,
+# zram's; no vendor hook here clears it -- the 18 Pro Max's zram.ko that registers
+# android_vh_adjust_swap_info_flags is not loaded, ours is). The thread does what swap_writeout()
+# would have done next, after the same "is the swap entry still needed" check, and kswapd's second
+# pass is shrink_inactive_list()'s again (MGLRU's evict_folios() has its own since mainline
+# 359a5e1416ca). The threads follow vm.reclaim_cpus (kswapd_mid above) and use zram's per-CPU
+# streams like any writer; zram_tiered's recompression thread stays on the little cores.
+KC_IO = """/*
+ * k618 port kcompressd -- vm.kcompressd: kswapd hands the anon folios it writes to zram (a device
+ * that compresses inside the write call: __SWP_WRITE_SYNCHRONOUS_IO) to per-node kcompressd
+ * threads instead of compressing them itself, and goes on scanning (the kcompressd proposal
+ * posted to linux-mm in 2025, as on the phone's 5.15 kernel). The folio stays
+ * locked until a thread has written it, as during kswapd's own write, so a fault on it, swapoff
+ * and anything else that wants it waits on the folio lock as before; with the queue (256 folios
+ * a node) full, kswapd writes it itself. The value is how many threads per node may work (0:
+ * off, at most 4): the first takes every folio, each further one joins while the backlog is
+ * another quarter of the queue deep. Direct reclaim and every other writer, shmem and large
+ * folios write in place as before. The threads are a reclaim context like kswapd (PF_MEMALLOC:
+ * may use the reserves, never reclaim themselves; their time counts as memory stall for PSI, as
+ * kswapd's own does), are not freezable, so that a queued folio never stays locked across a
+ * suspend, and follow vm.reclaim_cpus (mm/vmscan.c) each time they wake. kswapd frees what they
+ * wrote: back on the LRU, a written folio goes to the cold end; still in kswapd's batch, it gets
+ * a second pass (kcompressd_written() in mm/vmscan.c).
+ *   vm.kcompressd_pages  folios the threads wrote; vm.kcompressd_freed  folios the second pass
+ *                        freed (statistics: not exact)
+ */
+int vm_kcompressd = 2;
+unsigned long kcompressd_freed;
+static unsigned long kcompressd_pages;
+
+#define KCOMPRESSD_QUEUE	256	/* folios a node */
+#define KCOMPRESSD_THREADS	4	/* a node: the most vm.kcompressd allows */
+
+struct kcompressd {
+	spinlock_t lock;		/* the producer: kswapd */
+	int nid;
+	struct kcompressd_worker {
+		struct kcompressd *kc;
+		wait_queue_head_t wait;
+	} worker[KCOMPRESSD_THREADS];
+	DECLARE_KFIFO(fifo, struct folio *, KCOMPRESSD_QUEUE);
+};
+
+static struct kcompressd *kcompressd_of[MAX_NUMNODES] __read_mostly;
+
+static bool kcompressd_queue(struct folio *folio)
+{
+	int threads = min(READ_ONCE(vm_kcompressd), KCOMPRESSD_THREADS), i;
+	unsigned long flags;
+	struct kcompressd *kc;
+	unsigned int queued;
+
+	if (threads <= 0 || !current_is_kswapd())
+		return false;
+	/* anon folios of one page, to a device that compresses in the write call (zram) */
+	flags = data_race(__swap_entry_to_info(folio->swap)->flags);
+	if (!folio_test_anon(folio) || folio_test_large(folio) ||
+	    (flags & (SWP_FS_OPS | __SWP_WRITE_SYNCHRONOUS_IO)) != __SWP_WRITE_SYNCHRONOUS_IO)
+		return false;
+	kc = READ_ONCE(kcompressd_of[folio_nid(folio)]);
+	if (!kc)
+		return false;
+	folio_get(folio);
+	spin_lock(&kc->lock);
+	queued = kfifo_in(&kc->fifo, &folio, 1) ? kfifo_len(&kc->fifo) : 0;
+	spin_unlock(&kc->lock);
+	if (!queued) {
+		folio_put(folio);
+		return false;	/* the queue is full: kswapd writes it itself */
+	}
+	/* the first thread for any folio, one more for each further quarter of the queue */
+	threads = min_t(int, threads, 1 + (queued - 1) / (KCOMPRESSD_QUEUE / KCOMPRESSD_THREADS));
+	for (i = 0; i < threads; i++)
+		if (wq_has_sleeper(&kc->worker[i].wait))
+			wake_up_interruptible(&kc->worker[i].wait);
+	return true;
+}
+
+static void kcompressd_write(struct folio *folio)
+{
+	/* as at the start of swap_writeout(): the owner may have gone while it was queued */
+	if (folio_free_swap(folio)) {
+		trace_android_vh_shrink_folio_lock_owner_clear(folio);
+		folio_unlock(folio);
+	} else {
+		__swap_writepage(folio, NULL);
+		kcompressd_pages++;
+		/*
+		 * kswapd met it still locked and kept it. Back on the LRU by now, it goes to the
+		 * cold end, where the next scan frees it, as kswapd would have right away had it
+		 * written the folio itself; still off the LRU, kswapd's second pass frees it
+		 * (kcompressd_written() in mm/vmscan.c).
+		 */
+		folio_rotate_reclaimable(folio);
+	}
+	folio_put(folio);
+}
+
+static int kcompressd(void *arg)
+{
+	struct kcompressd_worker *w = arg;
+	struct kcompressd *kc = w->kc;
+	unsigned long pflags;
+	struct folio *folio;
+
+	/*
+	 * As kswapd: may use the reserves, never reclaims itself. Not freezable: a queued (locked)
+	 * folio is always written, also while the system suspends.
+	 */
+	current->flags |= PF_MEMALLOC;
+	while (!kthread_should_stop()) {
+		const struct cpumask *node = cpumask_of_node(kc->nid);
+
+		wait_event_interruptible(w->wait, !kfifo_is_empty(&kc->fifo) ||
+					 kthread_should_stop());
+		/* the node's reclaim CPUs (vm.reclaim_cpus, mm/vmscan.c) */
+		reclaim_cpus_follow(cpumask_empty(node) ? cpu_online_mask : node);
+		psi_memstall_enter(&pflags);
+		__fs_reclaim_acquire(_THIS_IP_);
+		while (kfifo_out_spinlocked_noirqsave(&kc->fifo, &folio, 1, &kc->lock)) {
+			kcompressd_write(folio);
+			cond_resched();
+		}
+		__fs_reclaim_release(_THIS_IP_);
+		psi_memstall_leave(&pflags);
+	}
+	return 0;
+}
+
+static const struct ctl_table kcompressd_sysctls[] = {
+	{
+		.procname	= "kcompressd",
+		.data		= &vm_kcompressd,
+		.maxlen		= sizeof(vm_kcompressd),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_FOUR,
+	},
+	{
+		.procname	= "kcompressd_pages",
+		.data		= &kcompressd_pages,
+		.maxlen		= sizeof(kcompressd_pages),
+		.mode		= 0444,
+		.proc_handler	= proc_doulongvec_minmax,
+	},
+	{
+		.procname	= "kcompressd_freed",
+		.data		= &kcompressd_freed,
+		.maxlen		= sizeof(kcompressd_freed),
+		.mode		= 0444,
+		.proc_handler	= proc_doulongvec_minmax,
+	},
+};
+
+static int __init kcompressd_init(void)
+{
+	int nid, i;
+
+	for_each_node_state(nid, N_MEMORY) {
+		struct kcompressd *kc = kzalloc_node(sizeof(*kc), GFP_KERNEL, nid);
+
+		if (!kc) {
+			pr_err("kcompressd%d: no memory, kswapd compresses in place\\n", nid);
+			continue;
+		}
+		spin_lock_init(&kc->lock);
+		INIT_KFIFO(kc->fifo);
+		kc->nid = nid;
+		/* every queue first: kswapd may wake one whose thread did not start (a no-op) */
+		for (i = 0; i < KCOMPRESSD_THREADS; i++) {
+			kc->worker[i].kc = kc;
+			init_waitqueue_head(&kc->worker[i].wait);
+		}
+		for (i = 0; i < KCOMPRESSD_THREADS; i++) {
+			struct task_struct *t;
+
+			t = i ? kthread_run(kcompressd, &kc->worker[i], "kcompressd%d:%d", nid, i) :
+				kthread_run(kcompressd, &kc->worker[i], "kcompressd%d", nid);
+			if (IS_ERR(t)) {
+				pr_err("kcompressd%d: worker %d not started (%ld)\\n", nid, i,
+				       PTR_ERR(t));
+				break;
+			}
+		}
+		if (i)
+			WRITE_ONCE(kcompressd_of[nid], kc);
+		else
+			kfree(kc);
+	}
+	register_sysctl_init("vm", kcompressd_sysctls);
+	return 0;
+}
+late_initcall(kcompressd_init);
+
+"""
+KC_VS = """#ifdef CONFIG_SWAP
+/*
+ * k618 port kcompressd: the threads mostly write a folio while kswapd still holds it off the LRU
+ * with the rest of its batch (kswapd met it locked and kept it), so kcompressd_write()'s move to
+ * the cold end does not find it on the list, and it would go back to the head of the inactive
+ * list, kept in RAM and in zram until the list has come round. As MGLRU's evict_folios() does
+ * for a folio whose writeback ended while it was off the LRU (mainline 359a5e1416ca): the folios
+ * written meanwhile -- unlocked, clean, unmapped, still in the swap cache -- are set aside while
+ * the rest of the batch goes back (so that one still being written is on the LRU for
+ * kcompressd_write() to move), then get one more pass, which frees them.
+ */
+static void kcompressd_written(struct list_head *folio_list, struct list_head *written,
+			       struct scan_control *sc)
+{
+	struct folio *folio, *next;
+
+	if (!READ_ONCE(vm_kcompressd) || !current_is_kswapd())
+		return;
+	list_for_each_entry_safe(folio, next, folio_list, lru) {
+		if (!folio_test_anon(folio) || !folio_test_swapcache(folio) ||
+		    folio_test_large(folio) || folio_test_active(folio) ||
+		    folio_test_referenced(folio) || folio_test_unevictable(folio) ||
+		    folio_mapped(folio) || folio_test_locked(folio) ||
+		    folio_test_dirty(folio) || folio_test_writeback(folio))
+			continue;
+		list_move(&folio->lru, written);
+		/* (shrink_folio_list() counts it again) */
+		sc->nr_scanned -= folio_nr_pages(folio);
+	}
+}
+
+/* the second pass, and back to the LRU what it leaves (NR_ISOLATED went down with the batch) */
+static unsigned int kcompressd_retry(struct list_head *written, struct lruvec *lruvec,
+				     struct scan_control *sc)
+{
+	struct reclaim_stat stat;
+	unsigned int nr;
+
+	if (list_empty(written))
+		return 0;
+	nr = shrink_folio_list(written, lruvec_pgdat(lruvec), sc, &stat, false,
+			       lruvec_memcg(lruvec));
+	spin_lock_irq(&lruvec->lru_lock);
+	move_folios_to_lru(lruvec, written);
+	if (!cgroup_reclaim(sc))
+		__count_vm_events(PGSTEAL_KSWAPD, nr);
+	count_memcg_events(lruvec_memcg(lruvec), PGSTEAL_KSWAPD, nr);
+	__count_vm_events(PGSTEAL_ANON, nr);
+	spin_unlock_irq(&lruvec->lru_lock);
+	kcompressd_freed += nr;
+	return nr;
+}
+#else
+static inline void kcompressd_written(struct list_head *folio_list, struct list_head *written,
+				      struct scan_control *sc)
+{
+}
+
+static inline unsigned int kcompressd_retry(struct list_head *written, struct lruvec *lruvec,
+					    struct scan_control *sc)
+{
+	return 0;
+}
+#endif
+
+"""
+SI = "/*\n * shrink_inactive_list() is a helper for shrink_node().  It returns the number\n * of reclaimed pages\n */\n"
+WO = "/*\n * We may have stale swap cache pages in memory: notice\n * them here and get rid of the unnecessary final write.\n */\n"
+change("kcompressd", [
+    ("mm/swap.h", "void __swap_writepage(struct folio *folio, struct swap_iocb **swap_plug);\n",
+     "void __swap_writepage(struct folio *folio, struct swap_iocb **swap_plug);\n"
+     "/* k618 port kcompressd: mm/page_io.c, and its second pass in mm/vmscan.c */\n"
+     "extern int vm_kcompressd;\nextern unsigned long kcompressd_freed;\n", 1),
+    # page_io.c exports nothing: what it includes is in no CRC
+    ("mm/page_io.c", "#include <linux/zswap.h>\n",
+     "#include <linux/zswap.h>\n#include <linux/kfifo.h>\n#include <linux/kthread.h>\n"
+     "#include <linux/sched/mm.h>\n#include <linux/sysctl.h>\n#include \"internal.h\"\n", 1),
+    ("mm/page_io.c", WO, KC_IO + WO, 1),
+    ("mm/page_io.c", "\t__swap_writepage(folio, swap_plug);\n\treturn 0;\nout_unlock:\n",
+     "\tif (kcompressd_queue(folio))\t/* k618 port kcompressd */\n"
+     "\t\treturn 0;\t/* still locked: a kcompressd thread writes it */\n"
+     "\t__swap_writepage(folio, swap_plug);\n\treturn 0;\nout_unlock:\n", 1),
+    (VS, SI, KC_VS + SI, 1),
+    (VS, "\tLIST_HEAD(folio_list);\n\tunsigned long nr_scanned = 0;\n\tunsigned int nr_reclaimed = 0;\n",
+     "\tLIST_HEAD(folio_list);\n\tLIST_HEAD(written);\t/* k618 port kcompressd: kcompressd_written() */\n"
+     "\tunsigned long nr_scanned = 0;\n\tunsigned int nr_reclaimed = 0;\n", 1),
+    (VS, "\tnr_reclaimed = shrink_folio_list(&folio_list, pgdat, sc, &stat, false,\n\t\t\t\t\t lruvec_memcg(lruvec));\n",
+     "\tnr_reclaimed = shrink_folio_list(&folio_list, pgdat, sc, &stat, false,\n\t\t\t\t\t lruvec_memcg(lruvec));\n"
+     "\tkcompressd_written(&folio_list, &written, sc);\t/* k618 port kcompressd */\n", 1),
+    (VS, "\tlru_note_cost_unlock_irq(lruvec, file, stat.nr_pageout,\n\t\t\t\t\tnr_scanned - nr_reclaimed);\n",
+     "\tlru_note_cost_unlock_irq(lruvec, file, stat.nr_pageout,\n\t\t\t\t\tnr_scanned - nr_reclaimed);\n"
+     "\tnr_reclaimed += kcompressd_retry(&written, lruvec, sc);\t/* k618 port kcompressd */\n", 1),
+])
+
+
 def done(t, old, new):
     """an insertion keeps its old text (new contains it); a removal's new text is part of its old one"""
     if old in new:

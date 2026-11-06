@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -55,7 +56,7 @@ def main():
         check(archive.read('Image') == kernel, 'AK3 kernel differs from boot.img')
         check(archive.read('ramdisk-new.cpio.lz4') == ramdisk, 'AK3 ramdisk differs from boot.img')
         check(archive.read('anykernel.sh') == (project / 'tools/ak3/anykernel-618.sh').read_bytes(), 'AK3 installer differs')
-    with zipfile.ZipFile(dist / 'nuwa-618-v3.zip') as archive:
+    with zipfile.ZipFile(dist / 'nuwa-618-v4.zip') as archive:
         check(archive.testzip() is None and 'module.prop' in archive.namelist(), 'Invalid tuning-module zip')
         expected = {str(p.relative_to(project / 'module/nuwa-618')): p.read_bytes()
                     for p in (project / 'module/nuwa-618').rglob('*') if p.is_file()}
@@ -95,6 +96,10 @@ def main():
     device_modules = ['qcom-i2c-pmic.ko', 'qcom_pm8008-regulator.ko', 'stmvl53l5.ko']
     missing_devices = [m for m in device_modules if m not in modules or m not in batch_list]
     check(not missing_devices, 'Device driver modules missing from the batch: ' + ', '.join(missing_devices))
+    # Modules built from the project's sources into the batch (k618_timg.sh MIPOWER=1, PLACE=1).
+    project_modules = ['mi_power.ko', 'k618_place.ko']
+    missing_project = [m for m in project_modules if m not in modules or m not in batch_list]
+    check(not missing_project, 'Project modules missing from the batch: ' + ', '.join(missing_project))
     # Use the original port's ELF decoder, but enforce failure instead of merely reporting.
     decoder_path = project / 'kernel-6.18/k618_kmi_check.py'
     namespace = {'__name__': 'kmi_decoder'}
@@ -137,9 +142,25 @@ def main():
                     crc_mismatches.append(f'{path.name}: {name}')
     check(not crc_mismatches, 'KMI CRC mismatch: ' + ', '.join(crc_mismatches[:30]))
     check(imports_checked > 0, 'No versioned imports were inspected')
+    # Every versioned import of every staged module against its provider: another staged module
+    # (its __crc_* symbols) or vmlinux -- the check k618_timg.sh runs before it builds the image.
+    stage_crc = subprocess.run(
+        [sys.executable, '-I', str(project / 'kernel-6.18/k618_stage_crc.py'),
+         str(build / 'out-gki/Module.symvers'), str(build / 'boot-test/stage/rd/lib/modules')],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    summary = re.search(r'k618_stage_crc: (\d+) modules, (\d+) versioned imports checked, (\d+) differ, '
+                        r'(\d+) with no provider here', stage_crc.stdout)
+    check(summary is not None, 'Module import check gave no summary:\n' + stage_crc.stdout[-2000:])
+    check(stage_crc.returncode == 0 and summary[3] == '0',
+          'Module import CRC mismatch against a module or vmlinux provider:\n' + stage_crc.stdout[-3000:])
+    check(int(summary[2]) > imports_checked, 'Module-to-module imports were not inspected')
+    stage_imports = {'modules': int(summary[1]), 'versioned_imports_checked': int(summary[2]),
+                     'mismatches': 0, 'without_staged_provider': int(summary[4]),
+                     'providers': 'staged modules and vmlinux'}
     config = (build / 'out-gki/.config').read_text()
     for option in ('CONFIG_KSU=y', 'CONFIG_KSU_SUSFS=y', 'CONFIG_ZRAM_DEF_COMP="lz4"',
                    'CONFIG_KFENCE_DEFERRABLE=y', 'CONFIG_TMPFS_XATTR=y',
+                   'CONFIG_CPU_FREQ_GOV_SUGOV_EXT=y',
                    'CONFIG_RCU_LAZY=y', 'CONFIG_RCU_NOCB_CPU=y',
                    'CONFIG_TCP_CONG_BBR=y', 'CONFIG_TCP_CONG_CUBIC=y',
                    'CONFIG_NET_SCH_FQ=y', 'CONFIG_NET_SCH_FQ_CODEL=y',
@@ -157,19 +178,26 @@ def main():
         'dm_bufio_budget': 'k618_bufio_budget' in (source/'drivers/md/dm-bufio.c').read_text(),
         'setting_trial_guard': (project/'module/nuwa-618/trial-guard.sh').is_file(),
         'initramfs_last': 'k618 initramfs_last' in (source/'init/initramfs.c').read_text(),
+        'schedutilmium_walt': ((source/'kernel/sched/cpufreq_sugov_ext.c').is_file() and
+                               'k618: "walt" is schedutilmium' in (source/'drivers/cpufreq/cpufreq.c').read_text()),
+        'look_around': 'k618 port look_around' in (source/'mm/vmscan.c').read_text(),
+        'kswapd_mid': 'k618 port kswapd_mid' in (source/'mm/vmscan.c').read_text(),
+        'kcompressd': 'k618 port kcompressd' in (source/'mm/page_io.c').read_text(),
     }
     check(all(feature_checks.values()), 'Missing configured source feature: ' + str(feature_checks))
     report = {
         'status': 'passed', 'kernel_release': release, 'boot_header': version,
         'kernel_bytes': kernel_size, 'ramdisk_bytes': ramdisk_size,
         'module_count': len(modules), 'versioned_imports_checked': imports_checked,
+        'module_imports': stage_imports,
         'crc_mismatches': crc_mismatches, 'depmod_symbol_errors': errors,
         'depmod_version_errors': version_errors,
         'kernel_sha256': hashlib.sha256(kernel).hexdigest(),
         'ramdisk_sha256': hashlib.sha256(ramdisk).hexdigest(), 'cmdline': cmdline,
         'configured_source_features': feature_checks,
         'ramdisk': {'content': 'module layer only (lib/, k618_umh)', 'entries': len(files),
-                    'embedded_copy_identical': True, 'device_modules': device_modules},
+                    'embedded_copy_identical': True, 'device_modules': device_modules,
+                    'project_modules': project_modules},
         'tcp': {'built_in_congestion_control': ['cubic', 'bbr'], 'default': 'cubic',
                 'built_in_qdiscs': ['fq', 'fq_codel'], 'vendor_policy_module': 'mibbr.ko'},
         'limits': 'Build, payload and static ABI validation; hardware behavior requires device testing.'

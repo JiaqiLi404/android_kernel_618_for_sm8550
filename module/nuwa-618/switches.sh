@@ -19,6 +19,22 @@
 #   wl_blocker        wl_blocker_off         the built-in wakelock list / none                now
 #   wl_untimed        wl_untimed_off         wakelock.untimed_ms 500 / 0                      now
 #   alarm_hold        alarm_hold_off         alarmtimer.short_hold Y / N                      now
+#   verity_cache      verity_cache_off       dm_bufio.retain_when_free Y / N (k618_memory.py) now
+#   -- scheduling --
+#   gov_mium          gov_stock              schedutilmium on every policy / schedutil        now*
+#   caps              caps_off               schedutilmium caps 1 on policy3 and 7 / 0        now*
+#   mid_burst         mid_burst_off          policy3 caps_burst 1536000 / 0                   now*
+#   touch_floor       touch_floor_off        policy0 touch_floor 1344000 / 0                  now*
+#   place_em          place_em_off           k618_place em 1 (measured energy model) / 0      now
+#   place_rt          place_rt_off           k618_place rt 1 / 0                              now
+#   place_pull        place_pull_off         k618_place pull 1 / 0                            now
+#   place_slice       place_slice_off        k618_place slice 1 / 0                           now
+#   place_sync        place_sync_off         k618_place sync 1 / 0                            now
+#   look_around       look_around_off        vm.look_around 1 / 0                             now
+#   kswapd_mid        kswapd_mid_off         vm.kswapd_mid 1 / 0                              now
+#   kcompressd        kcompressd_off         vm.kcompressd 2 / 0                              now
+#   (* the vendor's post-boot script writes "walt" -- schedutilmium -- into every policy late in
+#   the boot, so service.sh applies these once more after sys.boot_completed: sw_apply_gov)
 #
 # Whatever the kernel lacks (another kernel, an older k618) is left alone: every write is
 # guarded by the node existing.
@@ -26,6 +42,8 @@
 A=/data/adb
 P=/sys/module
 Z=/sys/module/zram/parameters
+CF=/sys/devices/system/cpu/cpufreq
+PL=/sys/module/k618_place/parameters
 WLB=/sys/devices/virtual/misc/wakelock_blocker
 # the kernel's built-in list (tools/kernel-patches/wakelock_blocker.py --defaults), for switching back on
 WL_DEFAULT="qcom_rx_wakelock;IPA_CLIENT_APPS_WAN_COAL_CONS;IPA_CLIENT_APPS_WAN_LOW_LAT_CONS;IPA_CLIENT_APPS_LAN_CONS;IPA_WS;DIAG_WS;RMNET_DFC;RMNET_SHS;rmnet_ctl;rmnet_ipa%d;hal_bluetooth_lock;IPA_CLIENT_APPS_LAN_COAL_CONS;1-0008"
@@ -34,7 +52,11 @@ WL_DEFAULT="qcom_rx_wakelock;IPA_CLIENT_APPS_WAN_COAL_CONS;IPA_CLIENT_APPS_WAN_L
 SWITCHES="zram_tiered:zram_stock:boot rmap_stop:rmap_stop_off:now rmap_keep:rmap_keep_off:now
 kill_reap:kill_reap_off:now throttle_exempt:throttle_off:now erofs_prio:erofs_prio_off:now
 loop_hipri:loop_hipri_off:boot fence_names:fence_names_on:now wl_blocker:wl_blocker_off:now
-wl_untimed:wl_untimed_off:now alarm_hold:alarm_hold_off:now verity_cache:verity_cache_off:now"
+wl_untimed:wl_untimed_off:now alarm_hold:alarm_hold_off:now verity_cache:verity_cache_off:now
+gov_mium:gov_stock:now caps:caps_off:now mid_burst:mid_burst_off:now touch_floor:touch_floor_off:now
+place_em:place_em_off:now place_rt:place_rt_off:now place_pull:place_pull_off:now
+place_slice:place_slice_off:now place_sync:place_sync_off:now
+look_around:look_around_off:now kswapd_mid:kswapd_mid_off:now kcompressd:kcompressd_off:now"
 
 sw_file() {
     for s in $SWITCHES; do
@@ -78,6 +100,37 @@ sw_apply_now() {
     if sw_on alarm_hold; then w Y $P/alarmtimer/parameters/short_hold; else w N $P/alarmtimer/parameters/short_hold; fi
     if sw_on verity_cache; then w Y $P/dm_bufio/parameters/retain_when_free; else w N $P/dm_bufio/parameters/retain_when_free; fi
     if sw_on zram_tiered; then w "$(sw_num recomp_secs 600)" $Z/recomp_idle_secs; else w 0 $Z/recomp_idle_secs; fi
+    # placement (k618_place, loaded in the first stage) and reclaim
+    for x in em rt pull slice sync; do
+        if sw_on place_$x; then w 1 $PL/$x; else w 0 $PL/$x; fi
+    done
+    if sw_on look_around; then w 1 /proc/sys/vm/look_around; else w 0 /proc/sys/vm/look_around; fi
+    if sw_on kswapd_mid; then w 1 /proc/sys/vm/kswapd_mid; else w 0 /proc/sys/vm/kswapd_mid; fi
+    if sw_on kcompressd; then w 2 /proc/sys/vm/kcompressd; else w 0 /proc/sys/vm/kcompressd; fi
+    sw_apply_mium
+}
+
+# the governor of every policy -- schedutilmium (what "walt" means on k618) or schedutil.
+# Only a governor the policy offers is written, and only when it is not the one running.
+sw_apply_gov() {
+    if sw_on gov_mium; then g=schedutilmium; else g=schedutil; fi
+    for pd in $CF/policy*; do
+        [ -e "$pd/scaling_governor" ] || continue
+        grep -qw "$g" "$pd/scaling_available_governors" 2> /dev/null || continue
+        [ "$(cat "$pd/scaling_governor" 2> /dev/null)" = "$g" ] || echo "$g" > "$pd/scaling_governor" 2> /dev/null
+    done
+    sw_apply_mium
+}
+
+# schedutilmium's own files where it runs (each policy has its directory): the values the kernel
+# starts with when a switch is on, 0 when it is off
+sw_apply_mium() {
+    m=schedutilmium
+    if sw_on caps; then v=1; else v=0; fi
+    w $v $CF/policy3/$m/caps
+    w $v $CF/policy7/$m/caps
+    if sw_on mid_burst; then w 1536000 $CF/policy3/$m/caps_burst; else w 0 $CF/policy3/$m/caps_burst; fi
+    if sw_on touch_floor; then w 1344000 $CF/policy0/$m/touch_floor; else w 0 $CF/policy0/$m/touch_floor; fi
 }
 
 # the switches zram and the loop devices read when they are set up (post-fs-data.sh: HyperOS

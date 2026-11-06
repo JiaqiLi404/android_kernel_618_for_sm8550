@@ -83,6 +83,14 @@
  *        decides the 13 Pro's em-cycle switching), mi,max-brightness-clone and
  *        mi,panel-on-dimming-delay; SET_LOCAL_HBM only on mi,local-hbm-enabled panels.
  *
+ *  (8) /sys/hwconf/hw_mon and hw_mon_info_no_clear: the display usage statistics as JSON (stock
+ *      hwconf in the same .ko; see the section above k618_hw_init()). The ROM's other two names
+ *      from that .ko are no sysfs nodes: "dc_backlight" is disp feature 18, which stock answers
+ *      with "TODO" and nothing else (stored and accepted here, the default case of
+ *      k618_set_feature()); "ddic_mode" is a key of the DSI connector's "mi_mode_info" blob
+ *      property (with "mi_layer_info"), which is not ported (SDE connector properties and the
+ *      mode matching behind them).
+ *
  * Brightness, and why there is no double write: on this ROM SDM (libsdmdal, in the composer) writes
  * /sys/class/mi_display/disp-DSI-0/brightness_clone (0..max_brightness_clone). mi_disp turns that
  * into a BRIGHTNESS_CLONE event; the displayfeature HAL's MiBrightness (/odm/lib64/libmiBrightness
@@ -101,7 +109,9 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/fs.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/kobject.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/of.h>
@@ -110,6 +120,8 @@
 #include <linux/slab.h>
 #include <linux/soc/qcom/smem.h>
 #include <linux/spinlock.h>
+#include <linux/sysfs.h>
+#include <linux/timekeeping.h>
 #include <linux/uaccess.h>
 #include <linux/uidgid.h>
 #include <linux/wait.h>
@@ -360,6 +372,233 @@ struct k618_mi {
 static struct k618_mi *g_mi;
 
 static inline bool disp_ok(int id) { return id >= 0 && id < MI_DISP_MAX; }
+
+/*
+ * ---- /sys/hwconf/hw_mon: the display usage statistics (the phone's 5.15 msm_drm "hwconf") ----
+ *
+ * Stock keeps a tree of named groups of key/value strings (hwconf_init(), register/add/
+ * update_hw_monitor_info(); only msm_drm itself fills it) and prints it as JSON. The one group is
+ * the primary panel's, "display", with the keys of mi_dsi_panel_count_init() in its order; the
+ * values are fed by mi_dsi_panel_state_count() from the panel paths. Readers: PowerKeeper's
+ * thermal IPA (the <N>fps_times keys: seconds at each refresh rate), miui-services' TrackUtil and
+ * PowerInsight. Reading hw_mon zeroes the error counters (stock mi_dsi_panel_clean_data()); the
+ * 18 Pro Max's msm_drm added hw_mon_info_no_clear, the same text without that.
+ *
+ * Fed here, as stock does, from the hooks this file already has: panel_active (seconds lit:
+ * enable / nolp to disable / LP1 / LP2), the refresh-rate seconds (enable, nolp, timing switch;
+ * AOD and off count for none), kernel_boottime, kernel_days, panel_id (from the panel name).
+ * Left at stock's "0": the backlight averages, HBM, power-on cost, refresh count and the error
+ * counters (ESD, TE lost, underrun, overflow, ping-pong timeout, long commit, cmdq timeout,
+ * tp idle), which need hooks in SDE / DSI paths this port does not have.
+ */
+#define K618_HW_FPS_N 11
+static int k618_panel_id(struct dsi_panel *panel);
+static const char * const k618_hw_keys[] = {
+	"panel_active", "panel_refresh", "kernel_boottime", "kernel_days", "bl_level_avg",
+	"bl_level_high", "bl_level_low", "hbm_duration", "hbm_times", "tpidle_times",
+	"1fps_times", "10fps_times", "24fps_times", "30fps_times", "40fps_times", "48fps_times",
+	"50fps_times", "60fps_times", "90fps_times", "120fps_times", "144fps_times",
+	"panel_id", "poweron_cost_avg", "esd_times", "te_lost_times", "underrun_times",
+	"overflow_times", "pingpong_timeout_times", "commit_long_times", "cmdq_timeout_times",
+};
+#define K618_HW_KEYS ARRAY_SIZE(k618_hw_keys)
+#define K618_HW_KEY_FPS 10	/* index of "1fps_times" */
+static const u32 k618_hw_rates[K618_HW_FPS_N] = { 1, 10, 24, 30, 40, 48, 50, 60, 90, 120, 144 };
+
+static struct {
+	struct kobject *kobj;
+	struct mutex lock;
+	char *buf;			/* the printed text, PAGE_SIZE */
+	u64 val[K618_HW_KEYS];		/* "%llu" values, 0 = stock's initial "0" */
+	bool lit;			/* stock panel+0xd98 */
+	unsigned long lit_since;	/* jiffies */
+	u64 lit_jiffies;		/* stock panel+0xdb8 */
+	int fps_idx;			/* K618_HW_FPS_N = none (off, AOD, a rate stock has no key for) */
+	bool fps_started;
+	unsigned long fps_since;
+	u64 fps_jiffies[K618_HW_FPS_N];	/* stock panel+0xdf8 */
+	time64_t days_since;		/* real time the day count runs from (stock panel+0xda8) */
+	u64 days;			/* stock panel+0xdb0 */
+} k618_hw = { .fps_idx = K618_HW_FPS_N };
+
+/*
+ * stock mi_dsi_panel_count_init(): " 0a " 1, " 0b " 2, " 0c " 3, " 0d " 4, first match wins, 1
+ * when none matches (the 13 Pro's "xiaomi 38 0c 0a ..." is 1, its "42 02 0b" panel 2)
+ */
+static void k618_hw_panel_id(struct dsi_panel *panel)
+{
+	static const char * const ids[] = { " 0a ", " 0b ", " 0c ", " 0d " };
+	int i;
+
+	if (!k618_hw.buf || !panel || !panel->name || k618_panel_id(panel) != MI_DISP_PRIMARY)
+		return;
+	mutex_lock(&k618_hw.lock);
+	for (i = 0; i < ARRAY_SIZE(ids); i++)
+		if (strstr(panel->name, ids[i]))
+			break;
+	k618_hw.val[21] = i < ARRAY_SIZE(ids) ? i + 1 : 1;
+	mutex_unlock(&k618_hw.lock);
+}
+
+static u64 k618_hw_secs(u64 j)
+{
+	return div_u64(j, HZ);
+}
+
+/* stock mi_dsi_panel_fps_count(): the time at the previous rate goes to that rate's key */
+static void k618_hw_fps_locked(u32 fps)
+{
+	unsigned long now = jiffies;
+	int i, idx = K618_HW_FPS_N, old = k618_hw.fps_idx;
+
+	for (i = 0; i < K618_HW_FPS_N; i++)
+		if (k618_hw_rates[i] == fps)
+			idx = i;
+	if (!k618_hw.fps_started) {
+		k618_hw.fps_started = true;
+	} else if (idx != old && old < K618_HW_FPS_N) {
+		if (time_after(now, k618_hw.fps_since))
+			k618_hw.fps_jiffies[old] += now - k618_hw.fps_since;
+		k618_hw.val[K618_HW_KEY_FPS + old] = k618_hw_secs(k618_hw.fps_jiffies[old]);
+	} else if (idx == old) {
+		return;
+	}
+	k618_hw.fps_since = now;
+	k618_hw.fps_idx = idx;
+}
+
+/* stock mi_dsi_panel_active_count(): lit time, boot time and whole days, published at the end */
+static void k618_hw_active_locked(bool on)
+{
+	unsigned long now = jiffies;
+	time64_t real, d;
+
+	if (on) {
+		if (!k618_hw.lit) {
+			k618_hw.lit = true;
+			k618_hw.lit_since = now;
+		}
+		return;
+	}
+	if (!k618_hw.lit)
+		return;
+	k618_hw.lit = false;
+	if (time_after(now, k618_hw.lit_since))
+		k618_hw.lit_jiffies += now - k618_hw.lit_since;
+	k618_hw.val[0] = k618_hw_secs(k618_hw.lit_jiffies);
+	k618_hw.val[2] = div_u64(ktime_get_boottime_ns(), NSEC_PER_SEC);
+	real = ktime_get_real_seconds();
+	d = real - k618_hw.days_since;
+	if (!k618_hw.days_since || d <= 0 || d > 315360000) {
+		k618_hw.days_since = real;
+	} else if (d >= 86401) {
+		k618_hw.days += div_u64(d, 86400);
+		k618_hw.days_since = real - (d % 86400);
+	}
+	k618_hw.val[3] = k618_hw.days;
+}
+
+/* stock mi_dsi_panel_state_count() events ACTIVE (0) and FPS (3), primary panel only */
+static void k618_hw_state(struct dsi_panel *panel, bool lit)
+{
+	if (!k618_hw.buf || !panel || k618_panel_id(panel) != MI_DISP_PRIMARY)
+		return;
+	mutex_lock(&k618_hw.lock);
+	k618_hw_active_locked(lit);
+	k618_hw_fps_locked(lit && panel->cur_mode ? panel->cur_mode->timing.refresh_rate : 0);
+	mutex_unlock(&k618_hw.lock);
+}
+
+static void k618_hw_fps(struct dsi_panel *panel)
+{
+	if (!k618_hw.buf || !panel || !panel->cur_mode || k618_panel_id(panel) != MI_DISP_PRIMARY)
+		return;
+	mutex_lock(&k618_hw.lock);
+	if (k618_hw.lit)
+		k618_hw_fps_locked(panel->cur_mode->timing.refresh_rate);
+	mutex_unlock(&k618_hw.lock);
+}
+
+/* stock hw_item_print() for the root -> "display" -> keys tree; hw_mon_show() adds a newline */
+static ssize_t k618_hw_print(char *out, bool clear)
+{
+	int i, n;
+
+	mutex_lock(&k618_hw.lock);
+	n = scnprintf(k618_hw.buf, PAGE_SIZE, "{\n%8s\"%s\" : {\n", "", "display");
+	for (i = 0; i < K618_HW_KEYS; i++)
+		n += scnprintf(k618_hw.buf + n, PAGE_SIZE - n, "%16s\"%s\" : \"%llu%s\n", "",
+			       k618_hw_keys[i], k618_hw.val[i], i < K618_HW_KEYS - 1 ? "\"," : "\"");
+	n += scnprintf(k618_hw.buf + n, PAGE_SIZE - n, "%8s}\n}\n", "");
+	if (clear) {
+		/*
+		 * stock mi_dsi_panel_clean_data(): only the seven error counters (esd_times ..
+		 * cmdq_timeout_times) start again; the times are totals since boot, which
+		 * PowerKeeper takes differences of
+		 */
+		for (i = 23; i < K618_HW_KEYS; i++)
+			k618_hw.val[i] = 0;
+	}
+	n = scnprintf(out, PAGE_SIZE, "%s\n", k618_hw.buf);
+	mutex_unlock(&k618_hw.lock);
+	return n;
+}
+
+static ssize_t hw_mon_show(struct kobject *k, struct kobj_attribute *a, char *buf)
+{
+	return k618_hw_print(buf, true);
+}
+
+static ssize_t hw_mon_info_no_clear_show(struct kobject *k, struct kobj_attribute *a, char *buf)
+{
+	return k618_hw_print(buf, false);
+}
+
+/* stock: writes are accepted and ignored */
+static ssize_t k618_hw_store(struct kobject *k, struct kobj_attribute *a, const char *buf,
+			     size_t n)
+{
+	return n;
+}
+
+static struct kobj_attribute k618_hw_mon_attr =
+	__ATTR(hw_mon, 0644, hw_mon_show, k618_hw_store);
+static struct kobj_attribute k618_hw_mon_nc_attr =
+	__ATTR(hw_mon_info_no_clear, 0644, hw_mon_info_no_clear_show, k618_hw_store);
+static struct attribute *k618_hw_attrs[] = {
+	&k618_hw_mon_attr.attr,
+	&k618_hw_mon_nc_attr.attr,
+	NULL,
+};
+static const struct attribute_group k618_hw_group = { .attrs = k618_hw_attrs };
+
+/* stock hwconf_init(): /sys/hwconf with its attribute group (the debugfs "hwconf_check" is left out) */
+static void k618_hw_init(void)
+{
+	mutex_init(&k618_hw.lock);
+	k618_hw.buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!k618_hw.buf)
+		return;
+	k618_hw.kobj = kobject_create_and_add("hwconf", NULL);
+	if (!k618_hw.kobj || sysfs_create_group(k618_hw.kobj, &k618_hw_group)) {
+		pr_err("hwconf: /sys/hwconf not created\n");
+		kobject_put(k618_hw.kobj);
+		k618_hw.kobj = NULL;
+		kfree(k618_hw.buf);
+		k618_hw.buf = NULL;
+	}
+}
+
+static void k618_hw_exit(void)
+{
+	if (k618_hw.kobj) {
+		sysfs_remove_group(k618_hw.kobj, &k618_hw_group);
+		kobject_put(k618_hw.kobj);
+		k618_hw.kobj = NULL;
+	}
+	kfree(k618_hw.buf);
+	k618_hw.buf = NULL;
+}
 
 /* ---- event delivery ---- */
 
@@ -1694,6 +1933,7 @@ void k618_mi_disp_timing_switch(struct dsi_panel *panel)
 	}
 	k618_em_update(b, panel, K618_UPD_TIMING_SWITCH, b->last_bl);
 	k618_last_fps(b, panel);
+	k618_hw_fps(panel);	/* stock dsi_display_set_mode(): the new mode's rate */
 }
 
 /*
@@ -1803,6 +2043,8 @@ void k618_mi_disp_post_lp(struct dsi_panel *panel, int rc)
 {
 	struct k618_bl *b = k618_bl_get(panel);
 
+	if (!rc)
+		k618_hw_state(panel, false);	/* stock dsi_panel_set_lp1/lp2(): not lit, no rate */
 	if (!b || rc)
 		return;
 	b->in_lp = true;
@@ -1836,6 +2078,8 @@ void k618_mi_disp_post_nolp(struct dsi_panel *panel, int rc)
 	struct k618_bl *b = k618_bl_get(panel);
 	bool from_doze;
 
+	if (!rc)
+		k618_hw_state(panel, true);	/* stock dsi_panel_set_nolp(): lit, the mode's rate */
 	if (!b)
 		return;
 	if (!rc) {
@@ -1867,6 +2111,7 @@ void k618_mi_disp_panel_off(struct dsi_panel *panel)
 {
 	struct k618_bl *b = k618_bl_get(panel);
 
+	k618_hw_state(panel, false);	/* stock dsi_panel_disable(): not lit, no rate */
 	if (!b)
 		return;
 	b->em_16p = false;
@@ -3094,6 +3339,8 @@ void k618_mi_disp_panel_on(struct dsi_panel *panel)
 		return;
 	d = container_of(panel->host, struct dsi_display, host);
 	k618_mi_disp_attach(d);   /* bind the display + create disp-DSI-<n> if not yet done */
+	k618_hw_panel_id(panel);
+	k618_hw_state(panel, true);	/* stock dsi_panel_enable(): lit, the mode's rate */
 	id = k618_panel_id(panel);
 	k618_notify_u32(id, MI_DISP_EVENT_POWER, 1 /* SDE_MODE_DPMS_ON */);
 	b = k618_bl_get(panel);   /* dsi_panel_enable() holds panel_lock */
@@ -3123,6 +3370,8 @@ void k618_mi_disp_splash(struct dsi_panel *panel)
 	if (!g_mi || !panel || !panel->host)
 		return;
 	k618_mi_disp_attach(container_of(panel->host, struct dsi_display, host));
+	k618_hw_panel_id(panel);
+	k618_hw_state(panel, true);	/* lit from the bootloader on */
 	mutex_lock(&panel->panel_lock);
 	b = k618_bl_get(panel);
 	if (b) {
@@ -3713,6 +3962,7 @@ int k618_mi_disp_init(void)
 	if (IS_ERR(mi->ddev[MI_DISP_PRIMARY]))
 		mi->ddev[MI_DISP_PRIMARY] = NULL;
 
+	k618_hw_init();	/* stock mi_disp_feature_init() -> hwconf_init() */
 	pr_info("mi_display ready: /dev/mi_display/disp_feature, version %#06x\n",
 		MI_DISP_FEATURE_VERSION);
 	return 0;
@@ -3735,6 +3985,7 @@ void k618_mi_disp_exit(void)
 
 	if (!mi)
 		return;
+	k618_hw_exit();
 	for (id = 0; id < MI_DISP_MAX; id++) {
 		cancel_delayed_work_sync(&mi->dimming_work[id]);
 		if (mi->ddev[id])

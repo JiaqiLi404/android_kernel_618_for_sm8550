@@ -50,13 +50,15 @@ if ! grep -q 'k618: the old netlink checks' $SE; then
 fi
 
 
-CF=$W/common/drivers/cpufreq/cpufreq.c
-if ! grep -q 'k618: "walt" is schedutil' $CF; then
-	perl -0pi -e 's|(\tfor_each_governor\(t\)\n\t\tif \(!strncasecmp\(str_governor, t->name, CPUFREQ_NAME_LEN\)\)\n\t\t\treturn t;\n\n)(\treturn NULL;\n\}\n)|$1\t/* k618: "walt" is schedutil while no walt governor is registered (kernel-6.18/k618_gki.sh) */\n\tif (!strncasecmp(str_governor, "walt", CPUFREQ_NAME_LEN))\n\t\treturn find_governor("schedutil");\n\n$2|' $CF
-	grep -q 'k618: "walt" is schedutil' $CF \
-		&& echo "k618_gki: walt -> schedutil" \
-		|| { echo "k618_gki: could not edit $CF"; exit 1; }
-fi
+# "walt" as a governor name: the bootloader's command line sets cpufreq.default_governor=performance
+# (the phone boots at full speed) and the vendor's post-boot script then writes "walt" into every
+# policy's scaling_governor, which 6.18 without WALT refuses, so the CPUs would stay at full speed.
+# k618_sched.py builds schedutilmium in (this project's cpufreq governor, first written for the
+# phone's 5.15 kernel, with the values its tuning module wrote there), makes "walt" select it, keeps
+# EAS on with it (cpufreq.walt_governor=schedutil on the command line: schedutil instead), and takes
+# out the older "walt -> schedutil" edit of find_governor() where an earlier build left it. Before
+# gki_defconfig: it adds two Kconfig options (default y).
+python3 -I $K618_DIR/k618_sched.py $W/common || exit 1
 
 
 IO=$W/common/drivers/iommu/iommu.c
@@ -191,6 +193,7 @@ $W/common/scripts/config --file $O/.config -e KFENCE_DEFERRABLE -e TMPFS_XATTR
 $M olddefconfig >> $O/../gki-config.log 2>&1
 grep -q '^CONFIG_ZRAM_DEF_COMP="lz4"' $O/.config || echo "k618_gki: CONFIG_ZRAM_DEF_COMP is not lz4"
 for c in KFENCE_DEFERRABLE TMPFS_XATTR; do grep -q "^CONFIG_$c=y" $O/.config || echo "k618_gki: CONFIG_$c did not take"; done
+for c in CPU_FREQ_GOV_SUGOV_EXT CPUFREQ_TESTBENCH; do grep -q "^CONFIG_$c=y" $O/.config || echo "k618_gki: CONFIG_$c did not take"; done
 grep -q '^# CONFIG_STATIC_USERMODEHELPER is not set' $O/.config || echo "k618_gki: STATIC_USERMODEHELPER did not take"
 for c in $GKI_MODS; do grep -q "^CONFIG_$c=m" $O/.config || echo "k618_gki: CONFIG_$c did not take"; done
 grep -q '^CONFIG_KSU=y' $O/.config || echo "k618_gki: CONFIG_KSU did not take"

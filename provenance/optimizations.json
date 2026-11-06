@@ -204,6 +204,71 @@
       "purpose_en": "Update statistics on idle exit, covering migration/fork paths and preventing busy time from being counted as idle in balancing decisions"
     },
     {
+      "id": "schedutilmium",
+      "name_en": "cpufreq governor schedutilmium",
+      "name_zh": "调频器 schedutilmium",
+      "classification": "project implementation on an upstream governor skeleton",
+      "origin_en": "This project's governor, first written for the phone's 5.15 kernel, on the skeleton of ACK's schedutil; the 6.18 version follows 6.18's cpufreq_schedutil.c where it copies that skeleton.",
+      "origin_zh": "本项目的调频器，最初为手机的 5.15 内核编写，基于 ACK schedutil 的框架；6.18 版本中沿用框架的部分按 6.18 的 cpufreq_schedutil.c 编写。",
+      "adaptation_en": "Built into the GKI (CONFIG_CPU_FREQ_GOV_SUGOV_EXT=y) as its own units, exporting nothing; \"walt\" written to scaling_governor selects it (cpufreq.walt_governor= names another); sugov_is_governor() accepts it so EAS stays on; built-in values are those the 5.15 tuning module wrote; the deadline servers' bandwidth is left out of the busy share; a test cpufreq driver (cpufreq_testbench, inert unless enabled on the command line) for QEMU checks.",
+      "adaptation_zh": "作为独立编译单元内置于 GKI（CONFIG_CPU_FREQ_GOV_SUGOV_EXT=y），不导出符号；写入 scaling_governor 的 \"walt\" 选中它（cpufreq.walt_governor= 可指定其他调频器）；sugov_is_governor() 接受它，EAS 保持开启；内置默认值取 5.15 调优模块写入的值；忙闲比不计入 deadline 服务器的带宽；另带一个测试用 cpufreq 驱动（cpufreq_testbench，命令行不启用时不起作用）供 QEMU 检查。",
+      "sources": [
+        {
+          "label": "ACK cpufreq_schedutil.c",
+          "url": "https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/sched/cpufreq_schedutil.c",
+          "role": "public code baseline"
+        }
+      ],
+      "implementation": "../kernel-6.18/k618_sched.py",
+      "purpose_zh": "本项目基于 schedutil 框架的调频器，内置于内核，由 vendor 写入的 \"walt\" 选中：升频、降频分开限速，以 CPU 实际忙闲作负载，频率上限随负载走，触摸后保底；EAS 照常开启，cpufreq.walt_governor=schedutil 恢复原版调频器",
+      "purpose_en": "The project's governor on schedutil's skeleton, built in and selected by the vendor's \"walt\": separate up/down rate limits, the CPU's busy time as its load, a ceiling that follows the load and a floor after a touch; EAS stays on with it, and cpufreq.walt_governor=schedutil restores the stock governor"
+    },
+    {
+      "id": "eas_placement",
+      "name_en": "Energy-aware placement rules",
+      "name_zh": "能耗感知选核规则",
+      "classification": "project implementation on upstream scheduler hooks",
+      "origin_en": "The kernel's energy-aware scheduling (EAS) in ACK fair.c places tasks; the RT wake-up path is ACK rt.c. The four rules and their placement on GKI's scheduler vendor hooks are this project's.",
+      "origin_zh": "任务由 ACK fair.c 中内核自己的能耗感知调度（EAS）放置，实时任务唤醒路径为 ACK rt.c；四条规则及其在 GKI 调度 vendor 钩子上的实现为本项目所做。",
+      "adaptation_en": "A module (k618_place) on GKI's restricted and normal scheduler hooks, each rule a module parameter: rt, pull (pull_wait_us 2000), slice (slice_us 1000), sync; \"draw threads\" are the main thread and RenderThread of a process in the top-app cpuset; hooks chosen clear of the ones the loaded vendor modules hold; never unloads; read-only state counters.",
+      "adaptation_zh": "以模块（k618_place）挂在 GKI 的受限与普通调度钩子上，每条规则一个模块参数：rt、pull（pull_wait_us 2000）、slice（slice_us 1000）、sync；“画帧线程”指 top-app cpuset 中进程的主线程与 RenderThread；钩子避开已加载 vendor 模块占用的钩子；不卸载；只读的 state 计数。",
+      "sources": [
+        {
+          "label": "ACK fair.c",
+          "url": "https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/sched/fair.c",
+          "role": "public code baseline"
+        },
+        {
+          "label": "ACK rt.c",
+          "url": "https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/sched/rt.c",
+          "role": "public code baseline"
+        }
+      ],
+      "implementation": "../kernel-6.18/k618_place.c",
+      "purpose_zh": "选核仍由内核的 EAS 完成，围绕画帧线程（应用主线程与 RenderThread）加四条可开关的规则：实时任务先放小核、不放到正在画帧的核上；画帧线程排队 2 ms 即拉到同簇空闲核；画帧线程用 1 ms EEVDF 时间片；放得进小核的任务不因大核唤醒者的同步提示被留在大核",
+      "purpose_en": "The kernel's EAS keeps placing tasks, with four switchable rules around the threads that draw frames (an app's main thread and RenderThread): RT tasks on the little cores first and never on a CPU drawing frames, a draw thread queued for 2 ms pulled to an idle CPU of its cluster, 1 ms EEVDF slices for draw threads, and no sync wake-up hint from a bigger core for a task that fits a little one"
+    },
+    {
+      "id": "measured_energy_model",
+      "name_en": "Measured CPU energy model",
+      "name_zh": "实测 CPU 能量表",
+      "classification": "project data on an upstream interface",
+      "origin_en": "Power measured on this SoC with its 5.15 kernel: four kinds of work (integer compute, dependent loads, memory bandwidth, compression) at several OPPs of each cluster; installed through ACK's em_dev_update_perf_domain().",
+      "origin_zh": "在本 SoC（其 5.15 内核）上实测的功耗：四种负载（整数计算、依赖访存、内存带宽、压缩）在各簇多个档位下测量；通过 ACK 的 em_dev_update_perf_domain() 安装。",
+      "adaptation_en": "Per workload and cluster, power and throughput are fitted against frequency; energy per unit of work is averaged geometrically over the four workloads and set so that EAS's cost (10 * power / performance) is proportional to it on every cluster. The device tree's model is restored with em=0; cpufreq's OPP choice is left as registered (em_ineff=0).",
+      "adaptation_zh": "按负载与簇拟合功耗、吞吐量与频率的关系；每单位工作的能耗对四种负载取几何平均，使 EAS 的代价（10 × 功耗 / 性能）在各簇都与之成正比。em=0 恢复设备树的表；cpufreq 的档位选择保持注册时的样子（em_ineff=0）。",
+      "sources": [
+        {
+          "label": "ACK energy_model.c",
+          "url": "https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/power/energy_model.c",
+          "role": "upstream interface"
+        }
+      ],
+      "implementation": "../kernel-6.18/k618_place_em.py",
+      "purpose_zh": "用本 SoC 实测功耗（每簇各档位、四种负载）推出的能量表代替设备树中只算动态功耗的表，使 EAS 的代价与每单位工作的能耗成正比；可在运行时切回",
+      "purpose_en": "Replace the device tree's dynamic-power-only model with one derived from power measured on this SoC (four kinds of work at each cluster's OPPs), so that EAS's cost follows the energy a unit of work takes; switchable back at run time"
+    },
+    {
       "id": "rmap_stop",
       "name_en": "Stop reference scans early",
       "name_zh": "提前停止反向映射扫描",
@@ -241,6 +306,75 @@
       "implementation": "../kernel-6.18/k618_ports.py",
       "purpose_zh": "默认将映射计数至少 32 的共享页视为活跃，减少反复遍历和回收公共页；保留压力上限",
       "purpose_en": "Treat pages with at least 32 mappings as active by default, reducing repeated walks and reclaim of shared pages; retain a pressure cap"
+    },
+    {
+      "id": "look_around",
+      "name_en": "Neighbour-page ageing in reclaim",
+      "name_zh": "回收时顺带检查邻页",
+      "classification": "public vendor policy reimplementation",
+      "origin_en": "OnePlus memload_opt look_around: the classic-LRU counterpart of MGLRU's lru_gen_look_around(), on GKI's look_around vendor hooks.",
+      "origin_zh": "一加 memload_opt 的 look_around：经典 LRU 下对应 MGLRU lru_gen_look_around() 的做法，基于 GKI 的 look_around vendor 钩子。",
+      "adaptation_en": "Rewritten for 6.18's folios: the classic branch of folio_referenced_one() gets the hook call 6.18 makes only for MGLRU; the mark is the spare folio flag bit above the page flags, below the vendor mi_mtmr module's marks; off while memory-allocation profiling uses those bits; vm.look_around and the vm.look_around_skipped counter.",
+      "adaptation_zh": "按 6.18 的 folio 重写：folio_referenced_one() 的经典 LRU 分支补上 6.18 只在 MGLRU 中调用的钩子；标记用页标志之上的空闲 folio 标志位，位于 vendor mi_mtmr 模块的标记之下；内存分配剖析占用这些位时关闭；vm.look_around 与计数 vm.look_around_skipped。",
+      "sources": [
+        {
+          "label": "OnePlus SM8850 look_around.c",
+          "url": "https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8850/blob/5ab2a689ff87d7d28c511f1762cf41c1b90d965a/vendor/oplus/kernel/mm/memload_opt/look_around/look_around.c",
+          "role": "source"
+        },
+        {
+          "label": "ACK rmap.c",
+          "url": "https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/mm/rmap.c",
+          "role": "public code baseline"
+        }
+      ],
+      "implementation": "../kernel-6.18/k618_ports.py",
+      "purpose_zh": "回收发现一个页表项近期被访问时，同一遍老化相邻页表项并标记其页，省去之后的反向映射遍历；基于 GKI 自带的 vendor 钩子，只用于经典 LRU",
+      "purpose_en": "When reclaim finds a young PTE, age the neighbouring PTEs in the same pass and mark their folios, sparing later reverse-map walks; on GKI's own vendor hooks, classic LRU only"
+    },
+    {
+      "id": "kswapd_mid",
+      "name_en": "kswapd on the middle cores",
+      "name_zh": "kswapd 放中核",
+      "classification": "project policy on upstream code",
+      "origin_en": "Project policy measured on the phone's 5.15 kernel: on the little cores reclaim took 2-2.5x the CPU time per page and the compositor running there missed more frames while apps started.",
+      "origin_zh": "本项目策略，在手机的 5.15 内核上测得：在小核上回收每页要多花 2-2.5 倍 CPU 时间，应用启动时同在小核的合成器丢帧更多。",
+      "adaptation_en": "Clusters told apart by CPU capacity; kswapd (and the kcompressd threads) move to the reclaim CPUs each time they wake, so the CPU-hotplug reset and the perf HAL's kswapd cpuset hold only until the next wake-up; vm.kswapd_mid and vm.reclaim_cpus (1 middle, 2 slowest, 0 no preference).",
+      "adaptation_zh": "按 CPU 算力区分各簇；kswapd（及 kcompressd 线程）每次唤醒时移到回收用的 CPU 上，因此 CPU 热插拔的重置和性能 HAL 的 kswapd cpuset 只到下次唤醒为止；vm.kswapd_mid 与 vm.reclaim_cpus（1 中核，2 最慢簇，0 不指定）。",
+      "sources": [
+        {
+          "label": "ACK vmscan.c",
+          "url": "https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/mm/vmscan.c",
+          "role": "public code baseline"
+        }
+      ],
+      "implementation": "../kernel-6.18/k618_ports.py",
+      "purpose_zh": "kswapd 与 kcompressd 线程放在中核簇，每次唤醒时重新检查：避开画帧所在的小核和前台应用需要的超大核",
+      "purpose_en": "Keep kswapd and the kcompressd threads on the middle cluster, checked again at each wake-up: off the little cores that draw frames and the prime core the foreground app wants"
+    },
+    {
+      "id": "kcompressd",
+      "name_en": "kcompressd",
+      "name_zh": "kcompressd",
+      "classification": "mailing-list design reimplemented on ACK",
+      "origin_en": "The kcompressd proposal posted to the linux-mm list in 2025: kswapd hands zram writes to per-node threads instead of compressing inside its own write call.",
+      "origin_zh": "2025 年发到 linux-mm 邮件列表的 kcompressd 提案：kswapd 把 zram 写入交给每节点线程，不在自己的写调用里压缩。",
+      "adaptation_en": "Rewritten for 6.18's folio swap-out path: only kswapd, only single-page anonymous folios to a device with synchronous writes (zram); a 256-folio queue per node, up to 4 threads joining by backlog; the folio stays locked until written; written folios still in kswapd's batch get a second pass that frees them; vm.kcompressd (2) with page and freed counters.",
+      "adaptation_zh": "按 6.18 的 folio 换出路径重写：只用于 kswapd、只处理写往同步写设备（zram）的单页匿名 folio；每节点 256 个 folio 的队列，按积压最多 4 个线程参与；写完之前 folio 一直加锁；仍在 kswapd 当批中的已写 folio 再过一遍即被释放；vm.kcompressd（2）及页数、释放数计数。",
+      "sources": [
+        {
+          "label": "ACK page_io.c",
+          "url": "https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/mm/page_io.c",
+          "role": "public code baseline"
+        },
+        {
+          "label": "kcompressd proposal on the linux-mm list (2025)",
+          "role": "design reference (mailing-list proposal; no link)"
+        }
+      ],
+      "implementation": "../kernel-6.18/k618_ports.py",
+      "purpose_zh": "kswapd 把要写入 zram 的匿名页交给每节点线程压缩，自己继续扫描；期间写完的页再过一遍即被释放；vm.kcompressd（每节点线程数，默认 2）",
+      "purpose_en": "kswapd hands the anonymous pages it writes to zram to per-node threads and keeps scanning; pages written meanwhile get a second pass that frees them; vm.kcompressd (threads per node, 2)"
     },
     {
       "id": "lz4",
@@ -544,6 +678,16 @@
       "area": "direct_swappiness",
       "decision": "keep_existing_policy",
       "reason": "A second cap can trade anonymous compression for file-cache loss without demonstrated benefit here."
+    },
+    {
+      "area": "task_placement",
+      "decision": "kernel_eas_with_measured_model",
+      "reason": "Placement stays with the kernel's EAS, which prices CPUs by the energy model; the model is replaced by a measured one and four switchable rules are added around frame-drawing threads."
+    },
+    {
+      "area": "vendor_walt",
+      "decision": "not_loaded",
+      "reason": "The available vendor WALT module is built for another SoC, needs device-tree nodes this phone does not have and takes the restricted scheduler hook slot the placement module uses."
     }
   ],
   "existing_capabilities": [

@@ -73,7 +73,7 @@ CL="$CL msm_drm.k618_bl_level=${BL_LEVEL:-1200}"
 [ "${KSU:-1}" = 1 ] && CL="$CL kernelsu.allow_shell=1"
 [ "${KSU:-1}" = 1 ] && [ "${KSUD:-1}" != 1 ] && CL="$CL kernelsu.noksud=1"
 # RT tasks' uclamp floor 0, as the vendor's post-boot script sets it: the kernel's default 1024 lets
-# only cpu7 "fit" an RT task and holds its cluster at the top frequency (drafts/k618_perf_health.md)
+# only cpu7 "fit" an RT task and holds its cluster at the top frequency
 CL="$CL sysctl.kernel.sched_util_clamp_min_rt_default=0"
 
 
@@ -150,7 +150,7 @@ if [ "${STAGE2:-0}" != 0 ]; then
 fi
 # MADRID="<module> ...": the 18 Pro Max's (madrid's) own 6.18 builds of these -- Xiaomi's closed
 # modules and its WALT. Our kernel's KMI is madrid's, so one loads as it is when every symbol it
-# imports is ours with the same CRC (scratchpad madrid_load.py checked them: all but mist). They go
+# imports is ours with the same CRC (k618_madrid_load.py checks them: all but mist). They go
 # into k618_load's batch only, after what they need, never into init's first-stage list, where one
 # module that will not load ends the boot. MADRID_ROOT: the unpacked firmware.
 XM=; BO=
@@ -172,6 +172,38 @@ fi
 if [ -n "$BA" ] && [ "${MITHERMAL:-1}" != 0 ]; then
 	EX="$EX $D/k618_mi_thermal.c"; BO="$BO k618_mi_thermal"
 	echo "mithermal: k618_mi_thermal into the batch"
+fi
+# MIPOWER=1 (default on with the batch): mi_power, the power_debug class with temp_aware -- the
+# mode PowerKeeper's low-temperature handler writes and mi_thermald, CameraMind and libcameraopt
+# read (init.qcom.rc gives it to system, the vendor labels it sysfs_poweraware); a rewrite of that
+# part of the phone's own 5.15 mi_power.ko (k618_mi_power.c, under the stock name).
+if [ -n "$BA" ] && [ "${MIPOWER:-1}" != 0 ]; then
+	EX="$EX $D/k618_mi_power.c=mi_power"; BO="$BO mi_power"
+	echo "mipower: mi_power into the batch"
+fi
+# PLACE=1 (default on with the batch): k618_place (k618_place.c) -- the kernel's own EAS keeps
+# placing tasks, with four changes around it and the CPU energy model taken from measured power
+# (k618_place_em.py): RT tasks little cores first and never onto a CPU running a draw thread (the
+# top-app main thread or RenderThread), a draw thread waiting 2 ms pulled to an idle CPU of its
+# cluster, EEVDF 1 ms slices for draw threads, no sync hint from a middle / prime waker for a task that
+# fits a little core. Each part is a parameter of /sys/module/k618_place/parameters (rt pull slice sync
+# em ...; "state" says what each did, "em_table" shows every OPP); MODOPTS="k618_place em=0" etc. starts
+# with a part off. The restricted hooks it takes cannot come out again, so it never unloads. In the
+# batch after MADRID's modules (cameramsger's newidle hook is the other one of its two slots) and after
+# cpufreq is up (the energy model it replaces has to exist; it retries for 120 s otherwise). It
+# includes kernel/sched/sched.h, so it is built with the Image's own tree every time (EXTRA does).
+if [ -n "$BA" ] && [ "${PLACE:-1}" != 0 ]; then
+	EX="$EX $D/k618_place.c"; BO="$BO k618_place"
+	echo "place: k618_place into the batch"
+fi
+# PLACE_TEST=1 (QEMU only, never for the phone; run with QEMU_SMP=8): k618_place_test right after
+# k618_place -- three energy-model domains like the phone's, then the model swap and its way back, the
+# slices, both pull paths and the RT placement are checked (k618_place_test.c); the batch takes ~15 s
+# longer. Results: "k618_place_test: PASS ..." / "FAIL ..." and "N passed, M failed".
+if [ -n "$BA" ] && [ -n "${PLACE_TEST:-}" ]; then
+	[ -n "${PLACE:-1}" ] && [ "${PLACE:-1}" != 0 ] || { echo "PLACE_TEST needs PLACE"; exit 1; }
+	EX="$EX $D/k618_place_test.c"; BO="$BO k618_place_test"
+	echo "place_test: k618_place_test after it (QEMU only)"
 fi
 
 
@@ -228,7 +260,19 @@ fi
 TPMODS="${TPMODS:-0}" GKIMODS="${GKIMODS:-zram zsmalloc rfkill libarc4 ${GKILOAD-tipc}}" PANICSIG=1 \
 	EXTRA="$EX" FIRST="$FI" LAST="$LA" OPTS="$PO" CMDLINE="$CL" STAGE2="$S2" \
 	BATCH="$BA" MADRIDMODS="$XM" BATCH_ONLY="$BO" \
-	bash "$D/k618_bootimg.sh" "$@"
+	bash "$D/k618_bootimg.sh" "$@" || exit 1
+# Every versioned import of every module in the stage against its provider (another module of the
+# stage, or the kernel): a module whose import differs is refused at load. A module built against an
+# earlier build of another (a Wi-Fi driver against an earlier cfg80211, say) is refused on the phone,
+# while in QEMU the Wi-Fi group is refused anyway (no PCIe there), so a boot does not show it.
+# CRC_MISMATCH_OK=1 builds the image anyway.
+if [ -d $K618/boot-test/stage/rd/lib/modules ]; then
+	python3 -I "$D/k618_stage_crc.py" $O/Module.symvers $K618/boot-test/stage/rd/lib/modules | tail -12
+	if [ "${PIPESTATUS[0]}" != 0 ] && [ "${CRC_MISMATCH_OK:-0}" = 0 ]; then
+		echo "k618_timg: a module's import differs from its provider (above) -- not building the image"
+		exit 1
+	fi
+fi
 # IR=0 stops here: QEMU takes the stage ramdisk as its initrd and does not need it inside the
 # kernel, so a run that is only going to QEMU saves the relink (k618_qemu.sh with no QEMU_KERNEL)
 [ "${IR:-1}" = 0 ] && exit 0

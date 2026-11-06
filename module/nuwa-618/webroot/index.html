@@ -121,6 +121,47 @@
 </div>
 </div>
 
+<div id="tab-sched" hidden>
+<p class="note">开 = 内核的默认，关 = 6.18 原版。每一项都能单独关掉对比耗电和流畅。</p>
+<div class="card">
+  <h2>调频</h2>
+  <div class="row"><div class="text"><b>schedutilmium</b><small>5.15 上用的调频器，按忙闲比调频（关：原版 schedutil）</small><small class="live" id="live-gov"></small></div>
+    <input type="checkbox" class="switch" data-sw="gov_mium"></div>
+  <div class="row"><div class="text"><b>频率天花板</b><small>中核、超大核的上限跟着负载走，不缩调度容量</small></div>
+    <input type="checkbox" class="switch" data-sw="caps"></div>
+  <div class="row"><div class="text"><b>中核突发上限</b><small>短的突发不超过 1536 MHz，忙满 1 秒才放开</small></div>
+    <input type="checkbox" class="switch" data-sw="mid_burst"></div>
+  <div class="row"><div class="text"><b>触摸后小核下限</b><small>碰屏后 1.5 秒小核不低于 1344 MHz</small></div>
+    <input type="checkbox" class="switch" data-sw="touch_floor"></div>
+</div>
+<div class="card">
+  <h2>选核</h2>
+  <div class="row"><div class="text"><b>实测能量表</b><small>按本机实测功耗选核（关：设备树的表）</small></div>
+    <input type="checkbox" class="switch" data-sw="place_em"></div>
+  <div class="row"><div class="text"><b>实时任务先放小核</b><small>也不放到正在画帧的核上</small></div>
+    <input type="checkbox" class="switch" data-sw="place_rt"></div>
+  <div class="row"><div class="text"><b>排队的画帧线程拉到空闲核</b><small>等了 2 ms 就拉到同簇的空闲核</small></div>
+    <input type="checkbox" class="switch" data-sw="place_pull"></div>
+  <div class="row"><div class="text"><b>画帧线程短时间片</b><small>主线程和 RenderThread 1 ms，更快轮到</small></div>
+    <input type="checkbox" class="switch" data-sw="place_slice"></div>
+  <div class="row"><div class="text"><b>大核唤醒不带同步提示</b><small>放得进小核的任务不被拉到唤醒者的大核上</small></div>
+    <input type="checkbox" class="switch" data-sw="place_sync"></div>
+</div>
+<div class="card">
+  <h2>回收</h2>
+  <div class="row"><div class="text"><b>顺带检查邻页</b><small>查一页时顺便看相邻页是否在用</small></div>
+    <input type="checkbox" class="switch" data-sw="look_around"></div>
+  <div class="row"><div class="text"><b>kswapd 放中核</b><small>小核回收同样的页要多花约 2.5 倍 CPU</small></div>
+    <input type="checkbox" class="switch" data-sw="kswapd_mid"></div>
+  <div class="row"><div class="text"><b>kcompressd</b><small>kswapd 把 zram 压缩交给专门的线程</small></div>
+    <input type="checkbox" class="switch" data-sw="kcompressd"></div>
+</div>
+<div class="card">
+  <h2>读数</h2>
+  <dl class="kv" id="kv-sched"></dl>
+</div>
+</div>
+
 <div id="tab-standby" hidden>
 <div class="card">
   <h2>唤醒</h2>
@@ -162,6 +203,7 @@
 
 <div id="tabs">
   <button data-tab="home" class="on">首页</button>
+  <button data-tab="sched">调度</button>
   <button data-tab="standby">待机</button>
   <button data-tab="debug">调试</button>
 </div>
@@ -254,6 +296,21 @@ async function load() {
   if (document.activeElement !== wl) wl.value = s.wl_user || "";
   document.getElementById("wl-default").textContent = "内置名单：" + (s.wl_default || "（关）");
   kv("kv-standby", [["挂起成功", s.suspend_ok], ["挂起失败", s.suspend_fail], ["整机深度睡眠", s.aosd ? s.aosd + " 次" : ""]]);
+  document.getElementById("live-gov").textContent = s.gov0 ? "现在：" + [s.gov0, s.gov3, s.gov7].join(" / ") : "";
+  kv("kv-sched", [
+    ["调频器（小 / 中 / 超大）", [s.gov0, s.gov3, s.gov7].filter(Boolean).join(" / ")],
+    ["中核天花板", s.caps3], ["超大核天花板", s.caps7],
+    ["能量表", s.place_em ? ({ measured: "实测", "device tree": "设备树", "not set": "还没换" }[s.place_em] || s.place_em) +
+      (s.place_em_domains ? "，" + s.place_em_domains + " 簇" : "") : ""],
+    ["前台识别", s.place_top_app ? ({ found: "已找到", "not yet": "还没找到" }[s.place_top_app] || s.place_top_app) : ""],
+    ["实时任务选核", s.place_rt_picks ? s.place_rt_picks + " 次，小核 " + s.place_rt_little + "，避开画帧核 " + s.place_rt_draw_skips : ""],
+    ["画帧线程被拉走", s.place_pulls ? (Number(s.place_pulls) + Number(s.place_pulls_newidle || 0)) + " 次" : ""],
+    ["短时间片", s.place_slice_sets ? s.place_slice_sets + " 个线程" : ""],
+    ["去掉的同步提示", s.place_sync_drops],
+    ["邻页检查省下", s.look_around_skipped],
+    ["kcompressd", s.kcompressd_pages ? s.kcompressd_pages + " 页，当批释放 " + s.kcompressd_freed : ""],
+    ["kswapd 可用的核", s.kswapd_cpus],
+  ]);
   kv("kv-zram", [
     ["算法", (s.zram_alg || "") + (s.zram_recomp ? " / " + s.zram_recomp : "")],
     ["大小", s.zram_size ? s.zram_size + " MB" : ""],
@@ -299,7 +356,7 @@ document.getElementById("refresh").onclick = load;
 for (const b of document.querySelectorAll("#tabs button")) {
   b.onclick = () => {
     for (const x of document.querySelectorAll("#tabs button")) x.classList.toggle("on", x === b);
-    for (const t of ["home", "standby", "debug"]) document.getElementById("tab-" + t).hidden = t !== b.dataset.tab;
+    for (const t of ["home", "sched", "standby", "debug"]) document.getElementById("tab-" + t).hidden = t !== b.dataset.tab;
   };
 }
 load();

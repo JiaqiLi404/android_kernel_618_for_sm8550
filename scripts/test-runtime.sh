@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# QEMU-only checks: configuration, tmpfs xattrs, zram recompression and slab teardown.
+# QEMU-only checks: configuration, tmpfs xattrs, the reclaim switches, the cpufreq governor on the
+# test cpufreq driver, zram recompression and slab teardown.
 set -euo pipefail
 [ "${K618_LIMITS_VERIFIED:-}" = 1 ] || { echo 'Use the limited entry point.' >&2; exit 2; }
 . "$(dirname -- "${BASH_SOURCE[0]}")/project-env.sh"
@@ -57,6 +58,21 @@ for algorithm in cubic bbr; do
 done
 [ "$(bb cat /proc/sys/net/ipv4/tcp_congestion_control)" = cubic ] || fail tcp-default
 echo "RUNTIME_CHECK: TCP PASS; available=$cc; default=cubic"
+for knob in look_around:1 kswapd_mid:1 reclaim_cpus:1 kcompressd:2; do
+    value=$(bb cat "/proc/sys/vm/${knob%%:*}") || fail "vm-${knob%%:*}-missing"
+    [ "$value" = "${knob#*:}" ] || fail "vm-${knob%%:*}=$value"
+done
+echo "RUNTIME_CHECK: reclaim switches PASS; look_around=1 kswapd_mid=1 reclaim_cpus=1 kcompressd=2"
+# cpufreq_testbench.enable=1: policy0 is CPU 0 alone; "walt" selects schedutilmium with the first
+# cluster's built-in values
+policy=/sys/devices/system/cpu/cpufreq/policy0
+bb grep -qw schedutilmium "$policy/scaling_available_governors" || fail schedutilmium-missing
+echo walt > "$policy/scaling_governor" || fail walt-write
+governor=$(bb cat "$policy/scaling_governor")
+[ "$governor" = schedutilmium ] || fail "walt-selects-$governor"
+[ "$(bb cat "$policy/schedutilmium/boost")" = -20 ] || fail schedutilmium-boost
+[ "$(bb cat "$policy/schedutilmium/touch_floor")" = 1344000 ] || fail schedutilmium-touch-floor
+echo "RUNTIME_CHECK: schedutilmium PASS; walt selects it; boost=-20 touch_floor=1344000"
 bb insmod /mods/zsmalloc.ko || fail zsmalloc-load
 bb insmod /mods/zram.ko recomp_idle_secs=0 || fail zram-load
 bb insmod /mods/k618_zramtest.ko || fail test-load
@@ -81,7 +97,7 @@ set +e
 timeout 120 qemu-system-aarch64 -M virt -cpu max,pauth-impdef=on -smp 4 -m 2048 \
     -nic none -nographic -no-reboot -kernel "$O/arch/arm64/boot/Image" \
     -initrd "$fixture/initrd.gz" \
-    -append 'console=ttyAMA0 earlycon=pl011,0x9000000 rdinit=/init panic=-1 trace_buf_size=8K rcu_nocbs=all rcutree.enable_rcu_lazy=1' \
+    -append 'console=ttyAMA0 earlycon=pl011,0x9000000 rdinit=/init panic=-1 trace_buf_size=8K rcu_nocbs=all rcutree.enable_rcu_lazy=1 cpufreq_testbench.enable=1' \
     > "$log" 2>&1
 result=$?
 set -e
@@ -91,6 +107,8 @@ from pathlib import Path
 log=Path(sys.argv[1]).read_text(errors='replace')
 passed=(int(sys.argv[3])==0 and 'RUNTIME_CHECK: PASS' in log and
         'RUNTIME_CHECK: TCP PASS' in log and
+        'RUNTIME_CHECK: reclaim switches PASS' in log and
+        'RUNTIME_CHECK: schedutilmium PASS' in log and
         'k618_zramtest: PASS' in log and 'RUNTIME_CHECK: FAIL' not in log and
         not re.search(r'BUG:|Oops:|WARNING:|Kernel panic',log))
 for line in log.splitlines():
@@ -103,7 +121,9 @@ report={'status':'passed','environment':'QEMU virt, four CPUs, 2 GiB guest RAM; 
         'checks':['tmpfs xattr storage/removal','deferrable KFENCE enabled','lazy RCU enabled',
                   '8 KiB initial trace setting','4 MiB zram data after two recompression rounds',
                   'dedicated candidate cache exists','zram unload destroys candidate cache',
-                  'BBR and CUBIC available; default CUBIC'],
+                  'BBR and CUBIC available; default CUBIC',
+                  'look_around, kswapd_mid, reclaim_cpus and kcompressd present with their defaults',
+                  '"walt" selects schedutilmium on the test cpufreq driver, with its built-in values'],
         'candidate_object_bytes':size,'data_pages_verified':1024}
 (Path(sys.argv[2])/'runtime-validation.json').write_text(json.dumps(report,indent=2)+'\n')
 print('RUNTIME VALIDATION PASSED')

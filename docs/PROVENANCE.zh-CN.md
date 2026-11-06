@@ -31,7 +31,7 @@ bash scripts/run-limited.sh bootstrap --check
 ### 输入如何组装
 
 1. 获取下表的 **15 个源码 / 工具链仓库**和 **2 个 vendor 引用**。
-2. 在一加 SoC 基础上应用 [soc-sm8550.patch](../patches/soc-sm8550.patch)，核对目标源码树，再组装 vendor 源码。补丁涉及 **228 个文件**，来源与树哈希见 [soc-baseline.json](../provenance/soc-baseline.json)。
+2. 在一加 SoC 基础上应用 [soc-sm8550.patch](../patches/soc-sm8550.patch)，核对目标源码树，再组装 vendor 源码。补丁涉及 **229 个文件**，来源与树哈希见 [soc-baseline.json](../provenance/soc-baseline.json)。
 3. 从两个官方 OTA 提取下表的 **6 个分区**，解包 ramdisk / EROFS，并核对 **54 个选用小米模块**的[单项哈希](../provenance/binary-modules.tsv)。
 
 这条路线直接生成完整工作区。三个 `assets/*.tar.zst` 是这些输入的可选离线缓存；已持有缓存时，可用 `bash scripts/run-limited.sh prepare` 代替 `bootstrap`，按 [SHA256SUMS](../assets/SHA256SUMS) 校验解包；SoC 源码树或 ToF 源码早于当前输入的缓存会被拒绝。
@@ -42,11 +42,11 @@ bash scripts/run-limited.sh bootstrap --check
 
 | 输入来源 | 用于本项目 | 适配 / 实现 |
 |:--|:--|:--|
-| [ACK 6.18.32 / Android 17](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d) | GKI 核心、内核模块 | [6.18 API / 配置与 root 集成](../kernel-6.18/k618_gki.sh) |
-| [OnePlus SM8850 kernel](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8850/tree/fc30e54174d254ff7f33622a9278e4435f6718d2) + [MiCode fuxi-t-oss](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/tree/7fad87dc178d09489b74a714e4a525d56f546855) | SM8550 时钟、TLMM、互联、UFS / ICE、USB、设备定义、DSP RPC 及 13 Ultra 的 PM8008 相机电源 | [SoC 基线补丁](../patches/soc-sm8550.patch)、[设备适配](../kernel-6.18/k618_kalama.py)、[RPC](../kernel-6.18/k618_rpc515.sh)、[PM8008 导入](../kernel-6.18/k618_fuxi_mods.py) |
+| [ACK 6.18.32 / Android 17](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d) | GKI 核心、内核模块 | [6.18 API / 配置与 root 集成](../kernel-6.18/k618_gki.sh)、[内置调频器](../kernel-6.18/k618_sched.py) |
+| [OnePlus SM8850 kernel](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8850/tree/fc30e54174d254ff7f33622a9278e4435f6718d2) + [MiCode fuxi-t-oss](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/tree/7fad87dc178d09489b74a714e4a525d56f546855) | SM8550 时钟、TLMM、互联、UFS / ICE、USB、设备定义、DSP RPC、13 Ultra 的 PM8008 相机电源，以及 ROM 读取的 UFS 与充电节点 | [SoC 基线补丁](../patches/soc-sm8550.patch)、[设备适配](../kernel-6.18/k618_kalama.py)、[RPC](../kernel-6.18/k618_rpc515.sh)、[PM8008 导入](../kernel-6.18/k618_fuxi_mods.py)、[UFS 节点](../kernel-6.18/k618_ufs.py)、[充电](../kernel-6.18/k618_mi_charger.py) |
 | [OnePlus SM8850 modules](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8850/tree/5ab2a689ff87d7d28c511f1762cf41c1b90d965a) | 显示、相机、GPU、音频、WLAN、NFC 和数据通路；保留对应 vendor/qcom、oplus、nxp、st 源码目录 | [组件选取](../kernel-6.18/k618_tp_get.sh)、[6.18 / vendor ABI 适配](../kernel-6.18/k618_tp_fix.py) |
 | [OnePlus SM8550 modules](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8550/tree/f3cc5d4de0e01dae3a935755367cc43f43c09761) | video-driver 与 eva-kernel，匹配本设备的视频 / EVA 接口 | [源码组合与兼容处理](../kernel-6.18/k618_tp_fix.py) |
-| [MiCode zeus-s-oss](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/tree/7d10d738b2c4299f3b8549c61a01ece39f19c788) | drivers/input/touchscreen/fts_spi 与 xiaomi | [触摸、手势与 THP 集成](../kernel-6.18/k618_touch.sh)、[13 / 13 Ultra 引脚与 THP](../kernel-6.18/k618_touch_devices.py) |
+| [MiCode zeus-s-oss](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/tree/7d10d738b2c4299f3b8549c61a01ece39f19c788) | drivers/input/touchscreen/fts_spi 与 xiaomi | [触摸、手势与 THP 集成](../kernel-6.18/k618_touch.sh)、[13 / 13 Ultra 引脚与 THP](../kernel-6.18/k618_touch_devices.py)、[13 指纹规则](../kernel-6.18/k618_touch_m3.py) |
 | [MiCode ishtar-t-oss](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/tree/16c625d2e63c5c38370f00fdff5e44be217ff6d5) | drivers/input/stmvl53l5：13 Ultra 的 VL53L5 ToF 测距 | [编译](../kernel-6.18/k618_tof.sh)、[6.18 接口适配](../kernel-6.18/k618_tof_fix.py) |
 | [ACK initramfs.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/init/initramfs.c) | 内置 initramfs | 内核只内置模块层，并在 bootloader 交来的 ramdisk 之后解包（正常启动或 recovery / TWRP）；[解包顺序](../kernel-6.18/k618_ports.py)、[模块层](../kernel-6.18/k618_irbuild.sh)、[镜像](../kernel-6.18/k618_bootimg.sh) |
 | [ACK CS35L41 / Cirrus DSP](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d) | CS35L41 / Cirrus DSP | [设备功放接口适配](../kernel-6.18/k618_cs35l41_fix.py) |
@@ -63,6 +63,10 @@ bash scripts/run-limited.sh bootstrap --check
 
 **设备树核查：** [k618_dtvariants.py](../kernel-6.18/k618_dtvariants.py) 按 bootloader 的方式合并每台手机的基础树和覆盖层，列出每个节点及绑定它的驱动。三台手机的每个硬件部件在这里都有驱动；唯一有两种器件的是 13 Pro 的面板。以上均未在 13、13 Ultra 或 42 02 0b 机器上运行过。
 
+**13 指纹路径上的触摸：** 三台手机的原厂触摸模块是小米同一份源码的三个编译版本：13 Pro 用 m2，13 Ultra 用 m1，13 用 m3。[k618_touch_m3.py](../kernel-6.18/k618_touch_m3.py) 加入 13 的规则，按触摸节点的固件名（`st_fts_m3`；`fts_touch_spi.k618_m3`）选用：指纹认证状态（模式 41）、由 IC 的长按事件报告按压、挂起 / 恢复与手势切换先等系统恢复，以及口袋模式下的长按，均照原厂。三台手机的“关 THP”命令现在只发给带 THP 的固件（`fts,support-thp-fw`；13 的固件没有），最后一指抬起时报告指纹抬起（`fod_press_status` 0），与所有原厂版本一致（`fts_touch_spi.k618_fod_up`）。这里不写触摸 IC 的闪存；以上尚未在 13 上运行过。
+
+**ROM 读取的功耗、存储与显示节点：** `mi_power`（[k618_mi_power.c](../kernel-6.18/k618_mi_power.c)，以原厂模块名编译）提供 `/sys/class/power_debug/temp_aware`：PowerKeeper 的低温处理写它，mi_thermald 和相机服务读它（照原厂：初值 10，只保存写入的 1-9）。UFS 主机新增 `ufs_monitor`（读写延迟统计，只在主机侧），并在原厂驱动支持的 KIOXIA 型号上提供 `ufscld`（厂商碎片整理，设备命令与原厂相同）；[k618_ufs.py](../kernel-6.18/k618_ufs.py) 把 [k618_ufs_mi.c](../kernel-6.18/k618_ufs_mi.c) 加入 ufs-qcom，`ufs_qcom.k618_cld=0` / `ufs_qcom.k618_ufs_monitor=0` 可去掉这些节点。显示接口新增 `/sys/hwconf/hw_mon` 与 `hw_mon_info_no_clear`（以 JSON 给出显示使用统计：亮屏时长、各刷新率时长、开机时长和面板编号有计数，其余键保持原厂初值 0）。充电驱动重新编入无线充电部分（`CONFIG_MI_WIRELESS=y`：反向充电、无线芯片固件与状态，以及 mi_thermald 写入的 `wlscharge_control_limit`），并去掉 fuxi 源码中每个固件字节一行的日志。
+
 **固定工具链：** [Clang r584948c](https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+/4a7d0a5e443c27d8f68fbd46abfab464e1355a69), [Rust 1.91.1.p3](https://android.googlesource.com/platform/prebuilts/rust-toolchain/linux-x86/+/a04f70c5179f23eff11c58cb480acee4afb1334b), [clang-tools / bindgen](https://android.googlesource.com/platform/prebuilts/clang-tools/+/4155cb466dcd9b53c6f873829c53aa6f905449dd), [kernel-build-tools / pahole](https://android.googlesource.com/kernel/prebuilts/build-tools/+/78af2daf5d9d36fc6e1ddb28ee0d7b6516709eb4), [build-tools](https://android.googlesource.com/platform/prebuilts/build-tools/+/e25d4821f50af3f6e0b87d7751dfd27037445fe5)。`bootstrap` 选取所需 Linux 目录，并下载用于可选安装器模拟的 [QEMU 8.2.2 static](https://archive.ubuntu.com/ubuntu/pool/universe/q/qemu/qemu-user-static_8.2.2+ds-0ubuntu1.18_amd64.deb)。编译不使用任意系统 Clang 替代这些输入；build-tools 同时获取 Bison 所需的 `common/bison` 共享数据。
 
 
@@ -78,13 +82,13 @@ bash scripts/run-limited.sh bootstrap --check
 
 入口按 HTTP Range 下载所需 payload 数据，核对操作与最终分区哈希，再用 mkbootimg / lz4 / cpio / fsck.erofs 提取所需文件。若服务器不支持 Range，可从上表下载完整 ZIP，保持原文件名放进 `BUILD_ROOT` 下的 `downloads/`，再重跑 `bootstrap`。
 
-nuwa 的引导输入与这里的官方 OS3.0.311.0 镜像逐字节相同；**运行目标仍是首页指定的 HyperOS 移植环境**。闭源模块按固件二进制保留；项目另据这些接口实现[温控](../kernel-6.18/k618_mi_thermal.c)、[回收控制](../kernel-6.18/k618_perf_helper.c)、[内存信息](../kernel-6.18/k618_mi_memory.c)、[显示](../kernel-6.18/k618_mi_disp.c)等兼容接口，未覆盖全部私有功能。公开源码保留上游文件头与许可证。
+nuwa 的引导输入与这里的官方 OS3.0.311.0 镜像逐字节相同；**运行目标仍是首页指定的 HyperOS 移植环境**。闭源模块按固件二进制保留；项目另据这些接口实现[温控](../kernel-6.18/k618_mi_thermal.c)、[回收控制](../kernel-6.18/k618_perf_helper.c)、[内存信息](../kernel-6.18/k618_mi_memory.c)、[显示](../kernel-6.18/k618_mi_disp.c)、[功耗调试](../kernel-6.18/k618_mi_power.c)、[UFS](../kernel-6.18/k618_ufs_mi.c)等兼容接口，未覆盖全部私有功能。公开源码保留上游文件头与许可证。
 
 <a id="improvements"></a>
 
 ## 4 · 内存、功耗与使用保护
 
-下表区分来源与本项目实现；完整归属和实现位置见 [optimizations.json](../provenance/optimizations.json)。核心入口为 [k618_ports.py](../kernel-6.18/k618_ports.py)。
+下表区分来源与本项目实现；完整归属和实现位置见 [optimizations.json](../provenance/optimizations.json)。核心入口为 [k618_ports.py](../kernel-6.18/k618_ports.py)、[k618_sched.py](../kernel-6.18/k618_sched.py) 和 [k618_place.c](../kernel-6.18/k618_place.c)。
 
 | 改动 | 来源链接 | 作用与适配 |
 |:--|:--|:--|
@@ -97,8 +101,14 @@ nuwa 的引导输入与这里的官方 OS3.0.311.0 镜像逐字节相同；**运
 | **及时回收被杀大进程** | [OnePlus SM8550 zram_opt.c](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8550/blob/f3cc5d4de0e01dae3a935755367cc43f43c09761/vendor/oplus/kernel/mm/zram_opt/zram_opt.c) | 被 SIGKILL 的进程占用匿名内存加 swap 超过默认 32 MiB 时，提前交给 OOM 回收器释放；阈值可调；[实现](../kernel-6.18/k618_ports.py) |
 | **去掉冗余 NOHZ CPU 计数** | [6b67c8a72e56](https://github.com/torvalds/linux/commit/6b67c8a72e56041f91f70ae5995bdb769761869a) · [94e70734b4d0](https://github.com/torvalds/linux/commit/94e70734b4d034b9df795bd1ad3452ea96e742ca) · [5d86d542f68f](https://github.com/torvalds/linux/commit/5d86d542f68fda7ef6d543ac631b741db734101a) | 用现有空闲 CPU 掩码代替全局原子计数，减少各核进出空闲时对同一缓存行的争用；[实现](../kernel-6.18/k618_ports.py) |
 | **空闲时间统计** | [4b603f1551a7](https://github.com/torvalds/linux/commit/4b603f1551a73e2868b9e7a14b3938c23275cefb) · [c6dcd97c8be7](https://github.com/torvalds/linux/commit/c6dcd97c8be75f052a1ca52cf79b03e7292962f1) | 在离开空闲时更新统计，覆盖迁移 / fork 等路径，避免把忙碌时间误算为空闲并影响均衡判断；[实现](../kernel-6.18/k618_ports.py) |
+| **调频器 schedutilmium** | [ACK cpufreq_schedutil.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/sched/cpufreq_schedutil.c) | 本项目基于 schedutil 框架的调频器，内置于内核，由 vendor 写入的 "walt" 选中：升频、降频分开限速，以 CPU 实际忙闲作负载，频率上限随负载走，触摸后保底；EAS 照常开启，`cpufreq.walt_governor=schedutil` 恢复原版调频器；[实现](../kernel-6.18/k618_sched.py) |
+| **能耗感知选核规则** | [ACK fair.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/sched/fair.c) · [ACK rt.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/sched/rt.c) | 选核仍由内核的 EAS 完成，围绕画帧线程（应用主线程与 RenderThread）加四条可开关的规则：实时任务先放小核、不放到正在画帧的核上；画帧线程排队 2 ms 即拉到同簇空闲核；画帧线程用 1 ms EEVDF 时间片；放得进小核的任务不因大核唤醒者的同步提示被留在大核；[实现](../kernel-6.18/k618_place.c) |
+| **实测 CPU 能量表** | [ACK energy_model.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/power/energy_model.c) | 用本 SoC 实测功耗（每簇各档位、四种负载）推出的能量表代替设备树中只算动态功耗的表，使 EAS 的代价与每单位工作的能耗成正比；可在运行时切回；[推导](../kernel-6.18/k618_place_em.py) |
 | **提前停止反向映射扫描** | 华为麒麟 9000 内核开源发布，`mm/stop_page_referencing.c` | 页的活跃性结论已确定时提前结束反向映射扫描，减少回收遍历；适配 folio / 经典 LRU 并保留 ABI；[实现](../kernel-6.18/k618_ports.py) |
 | **保留高共享映射页** | [MiCode mi_rmap_efficiency.c](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/e29c0fd34c6e8f91d30046a85d1afac3fe032a7e/drivers/staging/mi_rmap_efficiency/mi_rmap_efficiency.c) | 默认将映射计数至少 32 的共享页视为活跃，减少反复遍历和回收公共页；保留压力上限；[实现](../kernel-6.18/k618_ports.py) |
+| **回收时顺带检查邻页** | [OnePlus SM8850 look_around.c](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8850/blob/5ab2a689ff87d7d28c511f1762cf41c1b90d965a/vendor/oplus/kernel/mm/memload_opt/look_around/look_around.c) · [ACK rmap.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/mm/rmap.c) | 回收发现一个页表项近期被访问时，同一遍老化相邻页表项并标记其页，省去之后的反向映射遍历；基于 GKI 自带的 vendor 钩子，只用于经典 LRU；`vm.look_around`；[实现](../kernel-6.18/k618_ports.py) |
+| **kswapd 放中核** | [ACK vmscan.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/mm/vmscan.c) | kswapd 与 kcompressd 线程放在中核簇，每次唤醒时重新检查：避开画帧所在的小核和前台应用需要的超大核；`vm.kswapd_mid`、`vm.reclaim_cpus`；[实现](../kernel-6.18/k618_ports.py) |
+| **kcompressd** | [ACK page_io.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/mm/page_io.c) · linux-mm 邮件列表上的 kcompressd 提案（2025） | kswapd 把要写入 zram 的匿名页交给每节点线程压缩，自己继续扫描；期间写完的页再过一遍即被释放；`vm.kcompressd`（每节点线程数，默认 2）；[实现](../kernel-6.18/k618_ports.py) |
 | **LZ4：上游 1.10.1** | [LZ4 pinned lib/](https://github.com/lz4/lz4/tree/83376b665fe6742171407350bb51e963215d6088/lib) · [Linux 1.8.3 decoder baseline](https://github.com/torvalds/linux/commit/2209fda323e2fd2a2d0885595fd5097717f8d2aa) | 以 1.10.1 C 实现更新原有 1.8.3 解压代码；禁用 arm64 的 64 字节超前拷贝，保留 32 字节路径以保护 EROFS 原地解压，并适配模块 ABI；[实现](../tools/kernel-patches/lz4_upgrade.py) |
 | **唤醒锁 / 闹钟保持时间** | 本项目策略，作用于 [ACK wakelock.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/power/wakelock.c) · [ACK alarmtimer.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/time/alarmtimer.c) | 无时限唤醒锁默认 500 ms 到期，闹钟的额外保持缩至响后 5 ms，减少不必要的清醒时间；参数可恢复；[实现](../tools/kernel-patches/wake_holds.py) |
 | **唤醒锁拦截** | 本项目实现，基于 [ACK wakeup.c](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/drivers/base/power/wakeup.c) | 按可调名称名单（`/sys/devices/virtual/misc/wakelock_blocker`）过滤唤醒保持，RCU 管理名单并预筛前缀，减少热点查表；支持清空名单恢复；[实现](../tools/kernel-patches/wakelock_blocker.py) |
@@ -119,7 +129,7 @@ nuwa 的引导输入与这里的官方 OS3.0.311.0 镜像逐字节相同；**运
 
 **TCP：** 已内建 [BBR](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/net/ipv4/tcp_bbr.c)、[CUBIC](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/net/ipv4/tcp_cubic.c) 及 [fq](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/net/sched/sch_fq.c) / [fq_codel](https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/net/sched/sch_fq_codel.c) 队列。全局默认 **CUBIC**，并选用官方 `mibbr.ko` 的应用策略；内建 BBR 不表示所有连接都使用 BBR。
 
-**选用原则：** 采用上表的上游机制启用、专用 slab、有预算缓存与设置试用保护。保留 TCP 全局 cubic 默认及已有 BBR / fq_codel / mibbr 能力；保持线性映射权限策略。额外常驻保护、直接回收 swappiness 上限和未在当前内核复现的 F2FS 补充修改暂不加入。
+**选用原则：** 采用上表的上游机制启用、专用 slab、有预算缓存与设置试用保护。保留 TCP 全局 cubic 默认及已有 BBR / fq_codel / mibbr 能力；保持线性映射权限策略。额外常驻保护、直接回收 swappiness 上限和未在当前内核复现的 F2FS 补充修改暂不加入。选核仍用内核的 EAS，按实测能量表计价；不加载 vendor 的 WALT 模块：现有的是为另一款 SoC 编译的，需要本机设备树没有的节点，并且占用选核模块所用的受限调度钩子槽。
 
 试用保护属于可选调优模块：需重启的设置从下次启动计时，能确认同内核、窗口内 panic / watchdog 时才恢复修改前的值；不代替 boot 镜像备份。
 

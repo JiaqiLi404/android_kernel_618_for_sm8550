@@ -6,7 +6,7 @@
 
 [Download kernel packages](https://github.com/JiaqiLi404/android_kernel_618_for_sm8550/releases/tag/v6.18.32-nuwa.3) · Pre-release; physical-device validation is pending.
 
-Device: **Xiaomi 13 Pro / nuwa** (main target; both of its panel variants, 38 0c 0a and 42 02 0b, are handled). Driver adaptations for the **Xiaomi 13 / fuxi** and **Xiaomi 13 Ultra / ishtar** are included (touch, panel tuning and DC dimming, peak HDR, camera PHY, OIS and park lens, PM8008 camera PMIC, ToF sensor, charger nodes); they and the 42 02 0b panel have not been run on such units yet. Software target: **NikoHyper / HyperOS 4, OS4.0.24.0.XEOCNXM**. Other ROM/vendor combinations require separate adaptation.
+Device: **Xiaomi 13 Pro / nuwa** (main target; both of its panel variants, 38 0c 0a and 42 02 0b, are handled). Driver adaptations for the **Xiaomi 13 / fuxi** and **Xiaomi 13 Ultra / ishtar** are included (touch, with the 13's own fingerprint-path rules; panel tuning and DC dimming, peak HDR, camera PHY, OIS and park lens, PM8008 camera PMIC, ToF sensor, charger nodes); they and the 42 02 0b panel have not been run on such units yet. Software target: **NikoHyper / HyperOS 4, OS4.0.24.0.XEOCNXM**. Other ROM/vendor combinations require separate adaptation. Before installing, read the [usage notes](docs/BUILD.en.md#usage-notes) on the root manager and the boot screen.
 
 ## What we added
 
@@ -14,8 +14,8 @@ Device: **Xiaomi 13 Pro / nuwa** (main target; both of its panel variants, 38 0c
 |:--|:--|:--|
 | **Port 6.18 to SM8550** | Connect the newer kernel to the device's clock, UFS, USB, interconnect and power drivers | OnePlus driver foundation + MiCode device definitions; [driver origins](docs/PROVENANCE.en.md#drivers) |
 | **Integrate device and multimedia support** | Adapt display/composer, camera, video, DSP, touch/gestures and audio interfaces, including the 13 / 13 Ultra variants | Combine SM8850, SM8550 and Xiaomi sources and handle 6.18 API/ABI differences; [sources and adaptations](docs/PROVENANCE.en.md#drivers) |
-| **Match kernel, modules and boot images** | Produce a consistent module payload (404 modules), module-layer ramdisk, boot.img and AnyKernel3 package | 54 Xiaomi modules from official OTAs + rebuilt source modules; [firmware origins](docs/PROVENANCE.en.md#firmware) |
-| **Memory, scheduling and power changes** | Provide reclaim, LZ4 1.10.1/ZSTD recompression, idle-path and wake controls | Each upstream origin and project adaptation is identified; [22 changes](docs/PROVENANCE.en.md#improvements) |
+| **Match kernel, modules and boot images** | Produce a consistent module payload (406 modules), module-layer ramdisk, boot.img and AnyKernel3 package | 54 Xiaomi modules from official OTAs + rebuilt source modules; [firmware origins](docs/PROVENANCE.en.md#firmware) |
+| **Memory, scheduling and power changes** | Provide reclaim, LZ4 1.10.1/ZSTD recompression, a cpufreq governor, energy-aware task placement with a measured energy model, idle-path and wake controls | Each upstream origin and project adaptation is identified; [28 changes](docs/PROVENANCE.en.md#improvements) |
 | **Make builds reproducible and inspectable** | Pin and fetch dependencies, check ABI and packaging, and cap WSL build memory at 12 GiB | [Acquire inputs](docs/PROVENANCE.en.md#acquire) → [Build](docs/BUILD.en.md) → [Validate](docs/VALIDATION.en.md) |
 
 The main contribution is integrating these sources against one device interface and module ABI. Performance, power use and complete hardware behavior still require target-phone testing; see [validation scope](docs/VALIDATION.en.md#scope).
@@ -28,7 +28,9 @@ The main contribution is integrating these sources against one device interface 
 
 **Skip idle when work is pending.** Another CPU can wake a task while this CPU performs bookkeeping with interrupts disabled after selecting an idle state. Both CPU-idle and power-domain entry paths recheck scheduling before CPU PM/PSCI calls, reducing entry followed immediately by wakeup; s2idle retains its original semantics. [Sources and implementation](docs/PROVENANCE.en.md#improvements)
 
-Other improvements include deferrable KFENCE, lazy RCU, compact cold-page records, budgeted hash-cache retention and setting trials; tmpfs xattrs add compatibility. See [all 22 changes](docs/PROVENANCE.en.md#improvements) for sources, defaults and selection decisions.
+**Frequency and placement priced by measured energy.** The "walt" that the vendor's boot script writes into every CPU policy selects schedutilmium, the project's governor built into the kernel: separate up/down rate limits, the CPU's busy time in place of the scheduler's estimate, a ceiling that follows the load and a short floor after a touch. The kernel's own energy-aware scheduling (EAS) keeps placing tasks; `k618_place` replaces the device tree's dynamic-power-only energy model with one derived from measured power and adds four switchable rules around the threads that draw frames. [Sources and implementation](docs/PROVENANCE.en.md#improvements)
+
+Other improvements include neighbour-page ageing, kswapd on the middle cores and kcompressd in reclaim, deferrable KFENCE, lazy RCU, compact cold-page records, budgeted hash-cache retention and setting trials; tmpfs xattrs add compatibility. See [all 28 changes](docs/PROVENANCE.en.md#improvements) for sources, defaults and selection decisions.
 
 ## Follow these steps
 

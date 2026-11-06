@@ -16,7 +16,7 @@ The entry compiles GKI, SoC, Techpack and device modules, generates matching ram
 |:--|:--|
 | `dist/release/boot.img` | Kernel with the module layer built in, and the same layer as its ramdisk, for fastboot |
 | `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` | Kernel installer for a compatible flashing tool/recovery |
-| `dist/release/nuwa-618-v3.zip` | Optional KernelSU module to control kernel settings |
+| `dist/release/nuwa-618-v4.zip` | Optional KernelSU module to control kernel settings |
 | `dist/release/validation.json`, `SHA256SUMS` | Validation result and artifact hashes |
 | `logs/release/build.log` | Build log; investigate the first error if a stage fails |
 
@@ -64,7 +64,17 @@ Temporary boot does not flash boot; Android still writes user data and this kern
 | Horizon Kernel Flasher / compatible recovery | Install `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` |
 | Bootloader fastboot | Confirm the active slot, run `fastboot flash boot dist/release/boot.img`, then `fastboot reboot` |
 
-Keep the kernel, ramdisk and modules matched; retain the replacement ramdisk inside the AnyKernel3 ZIP. The vendor_boot/init_boot ramdisk, or the recovery ramdisk (for example TWRP), still runs with this kernel; only the module files and lists come from the module layer. Install the optional `nuwa-618-v3.zip` separately through KernelSU's module interface.
+Keep the kernel, ramdisk and modules matched; retain the replacement ramdisk inside the AnyKernel3 ZIP. The vendor_boot/init_boot ramdisk, or the recovery ramdisk (for example TWRP), still runs with this kernel; only the module files and lists come from the module layer. Install the optional `nuwa-618-v4.zip` separately through KernelSU's module interface; its scheduling page switches the governor, the placement rules and the reclaim changes one by one (off restores 6.18's stock behaviour).
+
+<a id="usage-notes"></a>
+
+### Usage notes
+
+| Topic | What to know |
+|:--|:--|
+| Root manager | KernelSU v3.3.1 (version code 32680) and SUSFS v2.3.0 are built into the kernel. The built-in KernelSU accepts only the official KernelSU manager's signature: managers of KernelSU forks report it as not installed and offer an LKM installation. LKM mode does not apply to this kernel: KernelSU is already built in, and LKM modules are for kernels without it. Use the official manager; if init_boot was patched for LKM before, flash the stock init_boot back (the phone still boots without that, but the old module fails to load at every boot). |
+| Black screen after the bootloader logo | Expected: the screen stays dark from the bootloader logo until the boot animation. The command line carries `msm_drm.k618_cont_splash=0`, so the kernel does not take over the display the bootloader lit; it powers the panel up again and draws its own first frame. This also keeps `fastboot boot` working, where the bootloader leaves no lit display to take over. |
+| Xiaomi 13 touch | The 13's stock rules on the fingerprint path are chosen from the touch firmware name (`st_fts_m3`); `dmesg \| grep "fingerprint rules"` shows which rules a phone got. |
 
 ## 4 · Rollback and troubleshooting
 

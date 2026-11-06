@@ -45,6 +45,17 @@ status() {
     p rmap_mapcount_kept "$(rl /proc/sys/vm/rmap_mapcount_kept)"
     p throttle_exempt_count "$(rl /proc/sys/vm/throttle_exempt_count)"
     p erofs_prio "$(rl $P/erofs/parameters/worker_prio)"
+    # scheduling -- each policy's governor, schedutilmium's ceiling state, k618_place's state
+    # ("key value" lines -> place_key=value), the reclaim counters and where kswapd may run
+    for n in 0 3 7; do p "gov$n" "$(rl $CF/policy$n/scaling_governor)"; done
+    p caps3 "$(rl $CF/policy3/schedutilmium/caps_state)"
+    p caps7 "$(rl $CF/policy7/schedutilmium/caps_state)"
+    [ -r $PL/state ] && awk '{ k = $1; $1 = ""; sub(/^ /, ""); printf "place_%s=%s\n", k, $0 }' $PL/state 2> /dev/null
+    p look_around_skipped "$(rl /proc/sys/vm/look_around_skipped)"
+    p kcompressd_pages "$(rl /proc/sys/vm/kcompressd_pages)"
+    p kcompressd_freed "$(rl /proc/sys/vm/kcompressd_freed)"
+    t=$(pidof kswapd0 2> /dev/null)
+    [ -n "$t" ] && p kswapd_cpus "$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/$t/status 2> /dev/null)"
     # standby
     p suspend_ok "$(rl /sys/power/suspend_stats/success)"
     p suspend_fail "$(rl /sys/power/suspend_stats/fail)"
@@ -70,6 +81,7 @@ case "$1" in
         sw_set "$2" "$3" || { echo "no switch $2"; exit 1; }
         guard_schedule "$f"
         sw_apply_now
+        sw_apply_gov
         ;;
     num)
         case "$3" in ''|*[!0-9]*) echo "bad number"; exit 1;; esac

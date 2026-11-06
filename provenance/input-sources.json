@@ -13,7 +13,7 @@
       "url": "https://github.com/OnePlusOSS/android_kernel_oneplus_sm8850.git",
       "revision": "fc30e54174d254ff7f33622a9278e4435f6718d2",
       "patch": "patches/soc-sm8550.patch",
-      "target_tree": "d5cf4e9098bd06a475ed87c5927d596928042942"
+      "target_tree": "3ddaf72a978d520b5ce6aa5e25d5a21d13f9787f"
     },
     {
       "name": "KernelSU",
