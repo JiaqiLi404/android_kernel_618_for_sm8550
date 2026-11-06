@@ -41,7 +41,7 @@ The table records the last complete run (bootstrap, build, `verify` and the QEMU
 |:--|:--|
 | Independent upstream reconstruction | **Passed**: 15 repositories, two vendor refs, six partitions and 54 module hashes ([record](../provenance/input-validation.json)) |
 | Source compilation | **Passed**: GKI, 249/249 SoC modules, 30/30 Techpack groups, RPC/EVA, touch/THP, CS35L41 and the ToF module |
-| Final modules and ABI | **404 modules, 21,107 versioned kernel imports**; no CRC mismatches or unresolved depmod errors |
+| Final modules and ABI | **404 modules, 21,116 versioned kernel imports**; no CRC mismatches or unresolved depmod errors |
 | Embedded-initramfs kernel | 18,008 vmlinux export CRCs match the base GKI; the built-in layer equals the boot ramdisk (416 entries, module layer only) and INITRAMFS_FORCE is off |
 | boot/AnyKernel3 consistency | Kernel, compressed ramdisk and all 17 command-line entries/order match; ZIP and required-list checks pass |
 | Installer emulation † | Previous tree: Horizon/slot A and recovery/slot B pass; inactive slot unchanged. Not re-run (see above); the installer script itself is unchanged apart from its command-line list, which the packer checks against the image |
@@ -68,8 +68,8 @@ adb shell cat /proc/sys/net/ipv4/tcp_congestion_control
 adb shell cat /sys/module/k618_probe/parameters/in_recovery
 ```
 
-Defaults should be **6.18.32, LZ4 primary compression, ZSTD recompression and 16 GiB zram**, and `in_recovery` reads `N`; in a recovery such as TWRP it reads `Y` and the recovery's own interface starts. Check touch/gestures, display, AOD exit by fingerprint, calls/mobile data, Wi-Fi, audio, every camera, fingerprint/face unlock, and unplugged screen-off suspend.
+Defaults should be **6.18.32, LZ4 primary compression, ZSTD recompression and 16 GiB zram**, and `in_recovery` reads `N`; in a recovery such as TWRP it reads `Y` and the recovery's own interface starts. Check touch/gestures, display, AOD exit by fingerprint, calls/mobile data, Wi-Fi, audio, every camera, fingerprint/face unlock, and unplugged screen-off suspend. On a 42 02 0b panel, also check fingerprint unlock at low brightness and from AOD.
 
 <a id="scope"></a>
 
-Source compilation, static checks, QEMU kernel checks and installer emulation on synthetic partitions pass. Real hardware modes, ROM compatibility, thermals, standby and power use still require phone testing; the 13 / 13 Ultra adaptations have not been run on those phones. The 128 MiB emulation fixtures do not establish the phone's physical partition size.
+Source compilation, static checks, QEMU kernel checks and installer emulation on synthetic partitions pass. Real hardware modes, ROM compatibility, thermals, standby and power use still require phone testing; the 13 / 13 Ultra adaptations and the 42 02 0b panel support have not been run on such units. The 128 MiB emulation fixtures do not establish the phone's physical partition size.

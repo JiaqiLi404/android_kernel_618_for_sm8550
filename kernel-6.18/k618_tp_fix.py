@@ -3748,6 +3748,665 @@ EDITS += [
 ]
 
 
+# Camera 24, park lens: the 13 Ultra's OIS park-lens thread (from its own 5.15 camera.ko).
+#
+# Where it goes: right after camera 24's EDITS block (the one ending with the tuple that appends
+# CAM_OIS_ULTRA after "EXPORT_SYMBOL(cam_ois_driver_cmd);\n#endif\n"), as its own
+# "EDITS += [...]". Several anchors are the last lines of camera-24 edits, each extended at its end
+# only (or text inserted ahead of a camera-24 block, never inside one), so camera 24's own `new`
+# texts stay whole; these tuples must come after camera 24 in EDITS. Every tuple keeps the file's
+# idempotency rules: either `old` is inside `new`, or `new` contains no copy of `old`.
+#
+# The 13 Pro: every new entry point checks o_ctrl->k618_ultra (false there), or a flag only the
+# Ultra paths set; the struct grows and k618_ois_park_setup() initialises its fields at probe.
+#
+# Camera 24's k618_ultra_pkt() keeps its "case K618_OIS_OPCODE_PARKLENS" (accepted, not acted on);
+# packet 6 no longer reaches it on the 13 Ultra, cam_ois_pkt_parse() hands it to k618_park_pkt()
+# first. Its comment is left as it is: editing CAM_OIS_ULTRA would change camera 24's `new` text.
+
+CAM_OIS_PARK_DECL = r"""
+/* k618 (camera 24, park lens): the 13 Ultra's OIS park-lens thread -- defined at the end of this file */
+#include <linux/kthread.h>
+static int k618_park_pkt(struct cam_ois_ctrl_t *o_ctrl, struct cam_packet *csl_packet);
+static void k618_park_on_init(struct cam_ois_ctrl_t *o_ctrl);
+static bool k618_park_take_power(struct cam_ois_ctrl_t *o_ctrl);
+static void k618_park_init_end(struct cam_ois_ctrl_t *o_ctrl);
+static bool k618_park_release(struct cam_ois_ctrl_t *o_ctrl);
+static bool k618_park_shutdown(struct cam_ois_ctrl_t *o_ctrl);
+"""
+
+CAM_OIS_PARK = r"""
+
+/*
+ * k618 (camera 24, park lens): the 13 Ultra's OIS park-lens thread, rebuilt from its 5.15
+ * camera.ko -- packet 6 (cam_ois_driver_cmd 0x15f560, 0x16110c), init_ois_parklens_info 0x15d3cc,
+ * ois_deinit_parklens_info 0x15d528, ois_parklens_power_down 0x15d728,
+ * ois_parklens_thread_trigger 0x15d8dc, the thread 0x15db30, ois_parklens_thread_stop 0x15e35c,
+ * cam_ois_i2c_modes_util 0x162464. Packet 6 carries settings that move the lens to rest step by
+ * step; a kernel thread applies them, each entry's delay as a countdown of 1 ms sleeps, and then
+ * powers the OIS down itself, so RELEASE can return while the lens is still moving.
+ *  k618_pl_state    (+0x1240) 0 none; 1 set up, no thread (not started, or ended and collected);
+ *                             2 thread started (it may have ended on its own since)
+ *  k618_pl_step     (+0x123c) 0 while the thread walks; set once as it ends: 2 stopped, power kept;
+ *                             3 done, or stopped with power-down; 4 settings invalid; 5 a step
+ *                             failed (3-5 power the OIS down); 6 that power-down failed
+ *  k618_pl_cmd      (+0x1238) 0; 2 stop and power down; 3 stop and keep the power
+ *  k618_pl_start    (+0x11e8) completed by the thread as it starts, waited for by the trigger
+ *  k618_pl_exit     (+0x1210) completed by the thread as it ends, waited for by the trigger (when
+ *                             the thread ended at once) and by a stop
+ *  k618_pl_settings (+0xf88)  packet 6's settings: the thread walks them, deletes them at its end
+ *  k618_pl_list     (+0x1248) the thread's copy of the last two entries, made as it starts, applied
+ *                             by a new INIT that stops the thread with the OIS still powered, freed
+ *                             by deinit
+ * The thread takes no mutex; trigger, stop and deinit run under ois_mutex (driver_cmd, shutdown).
+ * The power-down belongs to the thread from packet 6 on: RELEASE skips its own and leaves the power
+ * settings to the thread, which frees them after powering down. A new INIT stops the thread keeping
+ * the power; if the thread had not powered down yet, the INIT applies the copied entries and goes
+ * on without reading the power settings again or powering up; otherwise it powers up as usual.
+ * Where this differs from stock:
+ *  - the thread powers down with cam_sensor_util_power_down() and camera_io_release(), the body of
+ *    stock's cam_ois_power_down(); 6.x's cam_ois_power_down() also sets cam_ois_state, which the
+ *    thread may not touch outside ois_mutex
+ *  - shutdown (subdev close, CAM_SD_SHUTDOWN, unbind) first stops the thread with power-down and
+ *    waits for it, and powers down itself only when the thread did not; stock powers down and
+ *    frees the power settings while the thread may still be running, and its deinit refuses a
+ *    running thread
+ *  - a new INIT stops the thread as the INIT starts, not at its power-settings buffer; if the INIT
+ *    then fails before its power-up decision with the OIS still powered from the park, the OIS is
+ *    powered down at the INIT's exit; if the thread had powered down while cam_ois_state still
+ *    reads CONFIG (a second INIT in one session), cam_ois_state goes back to ACQUIRE so that this
+ *    INIT powers up
+ *  - packet 6 in the wrong state stops the thread with power-down, as stock; when that power-down
+ *    worked, cam_ois_state goes back to ACQUIRE so that RELEASE does not power down again
+ *  - RELEASE leaves the power settings to the thread whenever one may still use them, in any state
+ *    (6.x frees them always, stock only after its own power-down)
+ *  - a stop command other than 2 or 3 ends the thread as 2 (stock loops on "Invalid opcode for
+ *    parklens"); an empty settings list ends it as done (stock reads the list head as an entry)
+ *  - the copy takes the last two entries that exist, all of their registers (stock reads past the
+ *    head with fewer than two entries, and copies one register while keeping the size)
+ *  - poll timeouts in the thread are capped at K618_PARK_POLL_MAX_MS, so that a stop is reached in
+ *    bounded time
+ */
+#define K618_PARK_STOP_POWER_DOWN	2
+#define K618_PARK_STOP_KEEP_POWER	3
+#define K618_PARK_POLL_MAX_MS		1000
+
+/* from cam_ois_driver_soc_init(), both phones: stock cam_ois_component_bind 0x157c14-0x157c34 */
+void k618_ois_park_setup(struct cam_ois_ctrl_t *o_ctrl)
+{
+	INIT_LIST_HEAD(&(o_ctrl->k618_pl_settings.list_head));
+	INIT_LIST_HEAD(&(o_ctrl->k618_pl_list.list_head));
+	init_completion(&o_ctrl->k618_pl_start);
+	init_completion(&o_ctrl->k618_pl_exit);
+	atomic_set(&o_ctrl->k618_pl_cmd, 0);
+	atomic_set(&o_ctrl->k618_pl_step, 0);
+	atomic_set(&o_ctrl->k618_pl_state, 0);
+	o_ctrl->k618_pl_task = NULL;
+	o_ctrl->k618_pl_keep_power = false;
+	o_ctrl->k618_pl_powered = false;
+}
+
+/* stock cam_ois_i2c_modes_util (0x162464): random write, sequential write, polls; others ignored */
+static int k618_park_modes_util(struct camera_io_master *io, struct i2c_settings_list *l)
+{
+	struct cam_sensor_i2c_reg_setting *s = &(l->i2c_settings);
+	uint32_t i;
+	int rc = 0;
+
+	switch (l->op_code) {
+	case CAM_SENSOR_I2C_WRITE_RANDOM:
+		rc = camera_io_dev_write(io, s);
+		if (rc < 0)
+			CAM_ERR(CAM_OIS, "k618: park: Failed in Applying i2c wrt settings: %d", rc);
+		return rc;
+	case CAM_SENSOR_I2C_WRITE_SEQ:
+		rc = camera_io_dev_write_continuous(io, s, CAM_SENSOR_I2C_WRITE_SEQ);
+		if (rc < 0)
+			CAM_ERR(CAM_OIS, "k618: park: Failed to seq write I2C settings: %d", rc);
+		return rc;
+	case CAM_SENSOR_I2C_POLL:
+		for (i = 0; i < s->size; i++) {
+			rc = camera_io_dev_poll(io, s->reg_setting[i].reg_addr,
+				s->reg_setting[i].reg_data, s->reg_setting[i].data_mask,
+				s->addr_type, s->data_type,
+				min_t(uint32_t, s->reg_setting[i].delay, K618_PARK_POLL_MAX_MS));
+			if (rc < 0) {
+				CAM_ERR(CAM_OIS, "k618: park: i2c poll apply setting Fail: %d", rc);
+				return rc;
+			}
+		}
+		return rc;	/* a poll that timed out (1) is no failure, as stock */
+	default:
+		return 0;
+	}
+}
+
+/* one entry with all of its registers (stock 0x15db94-0x15dccc copies the first register only) */
+static struct i2c_settings_list *k618_park_copy(const struct i2c_settings_list *src)
+{
+	struct i2c_settings_list *dst;
+	uint32_t n = src->i2c_settings.size;
+
+	dst = CAM_MEM_ZALLOC(sizeof(*dst), GFP_KERNEL);
+	if (!dst)
+		return NULL;
+	*dst = *src;
+	dst->i2c_settings.reg_setting = NULL;
+	if (n && src->i2c_settings.reg_setting) {
+		dst->i2c_settings.reg_setting = CAM_MEM_ZALLOC(
+			n * sizeof(struct cam_sensor_i2c_reg_array), GFP_KERNEL);
+		if (!dst->i2c_settings.reg_setting) {
+			CAM_MEM_FREE(dst);
+			return NULL;
+		}
+		memcpy(dst->i2c_settings.reg_setting, src->i2c_settings.reg_setting,
+			n * sizeof(struct cam_sensor_i2c_reg_array));
+	} else {
+		dst->i2c_settings.size = 0;
+	}
+	INIT_LIST_HEAD(&(dst->list));
+	return dst;
+}
+
+/* stock cam_ois_power_down (0x15e79c), which leaves cam_ois_state as it is */
+static int k618_park_power_off(struct cam_ois_ctrl_t *o_ctrl)
+{
+	struct cam_ois_soc_private *soc_private =
+		(struct cam_ois_soc_private *)o_ctrl->soc_info.soc_private;
+	int rc;
+
+	rc = cam_sensor_util_power_down(&(soc_private->power_info), &(o_ctrl->soc_info));
+	if (rc) {
+		CAM_ERR(CAM_OIS, "k618: park: power down the core is failed:%d", rc);
+		return rc < 0 ? rc : -EIO;
+	}
+	camera_io_release(&(o_ctrl->io_master_info));
+	return 0;
+}
+
+/* stock thread 0x15e078-0x15e094: what RELEASE left to the thread */
+static void k618_park_free_power_settings(struct cam_ois_ctrl_t *o_ctrl)
+{
+	struct cam_ois_soc_private *soc_private =
+		(struct cam_ois_soc_private *)o_ctrl->soc_info.soc_private;
+	struct cam_sensor_power_ctrl_t *power_info = &(soc_private->power_info);
+
+	CAM_MEM_FREE(power_info->power_setting);
+	CAM_MEM_FREE(power_info->power_down_setting);
+	power_info->power_setting = NULL;
+	power_info->power_down_setting = NULL;
+	power_info->power_setting_size = 0;
+	power_info->power_down_setting_size = 0;
+}
+
+/*
+ * stock "parklens-thread" (0x15db30): tells the trigger it runs; copies the last two entries;
+ * then per pass reads the stop command (2: power down, step 3; 3: keep the power, step 2), checks
+ * the settings are valid (else step 4), sleeps the current entry's delay away 1 ms at a time
+ * (990-1010 us, the command checked between), and applies the next entry with that entry's delay
+ * zeroed (a failure: step 5); after the last entry (and its delay) step 3. Steps 3-5 power the OIS
+ * down (failing that: step 6) and free the power settings. Last, the settings are deleted and
+ * k618_pl_exit completed.
+ */
+static int k618_park_thread(void *data)
+{
+	struct cam_ois_ctrl_t *o_ctrl = data;
+	struct i2c_settings_array *set = &(o_ctrl->k618_pl_settings);
+	struct i2c_settings_list *cur = NULL, *copy;
+	struct list_head *pos;
+	uint32_t delay = 0, steps = 0;
+	int cmd, rc, step = 3, i;
+
+	complete(&o_ctrl->k618_pl_start);
+	CAM_INFO(CAM_OIS, "k618: OIS %s: parklens thread start up", o_ctrl->ois_name);
+
+	o_ctrl->k618_pl_list.is_settings_valid = 1;
+	o_ctrl->k618_pl_list.request_id = 0;
+	pos = set->list_head.prev;
+	for (i = 0; (i < 2) && (pos != &(set->list_head)); i++, pos = pos->prev) {
+		copy = k618_park_copy(list_entry(pos, struct i2c_settings_list, list));
+		if (copy)
+			list_add(&(copy->list), &(o_ctrl->k618_pl_list.list_head));
+	}
+
+	for (;;) {
+		cmd = atomic_read(&o_ctrl->k618_pl_cmd);
+		if (cmd == K618_PARK_STOP_KEEP_POWER) {
+			CAM_DBG(CAM_OIS, "k618: exit parklens thread no need power off");
+			atomic_set(&o_ctrl->k618_pl_step, 2);
+			goto out;
+		}
+		if (cmd >= 2) {
+			if (cmd != K618_PARK_STOP_POWER_DOWN)
+				CAM_ERR(CAM_OIS, "k618: Invalid opcode for parklens: %d, stopping with power down",
+					cmd);
+			step = 3;
+			goto power_off;
+		}
+		if (set->is_settings_valid != 1) {
+			CAM_ERR(CAM_OIS, "k618: parklens settings is not valid");
+			step = 4;
+			goto power_off;
+		}
+		if (delay) {
+			delay--;
+			usleep_range(990, 1010);
+			continue;
+		}
+		pos = cur ? cur->list.next : set->list_head.next;
+		if (pos == &(set->list_head)) {
+			CAM_DBG(CAM_OIS, "k618: parklens settings execute done");
+			step = 3;
+			goto power_off;
+		}
+		cur = list_entry(pos, struct i2c_settings_list, list);
+		delay = cur->i2c_settings.delay;
+		cur->i2c_settings.delay = 0;
+		CAM_DBG(CAM_OIS, "k618: Parklens total delay time %ums", delay);
+		rc = k618_park_modes_util(&(o_ctrl->io_master_info), cur);
+		if (rc < 0) {
+			CAM_ERR(CAM_OIS, "k618: parklens step failed, %d", rc);
+			step = 5;
+			goto power_off;
+		}
+		steps++;
+		CAM_DBG(CAM_OIS, "k618: ois_parklens_thread_func arg step/state %u/%d", steps,
+			atomic_read(&o_ctrl->k618_pl_state));
+	}
+
+power_off:
+	atomic_set(&o_ctrl->k618_pl_step, step);
+	rc = k618_park_power_off(o_ctrl);
+	if (rc < 0) {
+		CAM_ERR(CAM_OIS, "k618: parklens power down failed rc: %d", rc);
+		atomic_set(&o_ctrl->k618_pl_step, 6);
+	} else {
+		CAM_DBG(CAM_OIS, "k618: parklens thread power down success");
+	}
+	k618_park_free_power_settings(o_ctrl);
+out:
+	CAM_INFO(CAM_OIS, "k618: OIS %s: parklens thread exit, %u steps, step/result %d",
+		o_ctrl->ois_name, steps, atomic_read(&o_ctrl->k618_pl_step));
+	rc = delete_request(set);
+	if (rc < 0)
+		CAM_ERR(CAM_OIS, "k618: delete parklens request failed rc: %d", rc);
+	kthread_complete_and_exit(&o_ctrl->k618_pl_exit, 0);
+}
+
+/* stock ois_deinit_parklens_info (0x15d528): only with no thread running (state 1) */
+static int k618_park_deinit(struct cam_ois_ctrl_t *o_ctrl)
+{
+	if (atomic_read(&o_ctrl->k618_pl_state) != 1) {
+		CAM_DBG(CAM_OIS, "k618: deinit parklens in wrong state: %d",
+			atomic_read(&o_ctrl->k618_pl_state));
+		return -EINVAL;
+	}
+	delete_request(&(o_ctrl->k618_pl_list));
+	complete_all(&o_ctrl->k618_pl_start);
+	complete_all(&o_ctrl->k618_pl_exit);
+	atomic_set(&o_ctrl->k618_pl_cmd, 0);
+	atomic_set(&o_ctrl->k618_pl_step, 0);
+	atomic_set(&o_ctrl->k618_pl_state, 0);
+	o_ctrl->k618_pl_task = NULL;
+	return 0;
+}
+
+/*
+ * stock init_ois_parklens_info (0x15d3cc) and ois_parklens_thread_trigger (0x15d8dc): state 1,
+ * start the thread, wait for it to run; a thread that has not ended by then makes state 2, one
+ * that has is collected (state 1) and its step returned
+ */
+static int k618_park_trigger(struct cam_ois_ctrl_t *o_ctrl)
+{
+	struct task_struct *task;
+	int step;
+
+	delete_request(&(o_ctrl->k618_pl_list));
+	init_completion(&o_ctrl->k618_pl_start);
+	init_completion(&o_ctrl->k618_pl_exit);
+	atomic_set(&o_ctrl->k618_pl_cmd, 0);
+	atomic_set(&o_ctrl->k618_pl_step, 0);
+	o_ctrl->k618_pl_task = NULL;
+	atomic_set(&o_ctrl->k618_pl_state, 1);
+
+	task = kthread_run(k618_park_thread, o_ctrl, "parklens-thread");
+	if (IS_ERR(task)) {
+		CAM_ERR(CAM_OIS, "k618: parklens_thread create failed: %ld", PTR_ERR(task));
+		delete_request(&(o_ctrl->k618_pl_settings));
+		k618_park_deinit(o_ctrl);
+		return -ENOMEM;
+	}
+	o_ctrl->k618_pl_task = task;
+	CAM_INFO(CAM_OIS, "k618: OIS %s: trigger parklens thread", o_ctrl->ois_name);
+	wait_for_completion(&o_ctrl->k618_pl_start);
+	step = atomic_read(&o_ctrl->k618_pl_step);
+	if (step < 1) {
+		atomic_set(&o_ctrl->k618_pl_state, 2);
+		return step;
+	}
+	CAM_DBG(CAM_OIS, "k618: parklens thread execute failed %d", step);
+	wait_for_completion(&o_ctrl->k618_pl_exit);
+	step = atomic_read(&o_ctrl->k618_pl_step);
+	CAM_DBG(CAM_OIS, "k618: parklens thread exit: %d", step);
+	atomic_set(&o_ctrl->k618_pl_state, 1);
+	o_ctrl->k618_pl_task = NULL;
+	return step;
+}
+
+/*
+ * stock ois_parklens_thread_stop (0x15e35c): only with state 2; a thread still walking gets the
+ * command (anything but 2 or 3 becomes 2); then wait for its end, state 1, return its step
+ */
+static int k618_park_stop(struct cam_ois_ctrl_t *o_ctrl, int cmd)
+{
+	int step;
+
+	if (atomic_read(&o_ctrl->k618_pl_state) != 2) {
+		CAM_DBG(CAM_OIS, "k618: parklens thread is in other state: %d",
+			atomic_read(&o_ctrl->k618_pl_state));
+		return -EINVAL;
+	}
+	step = atomic_read(&o_ctrl->k618_pl_step);
+	if (step) {
+		CAM_DBG(CAM_OIS, "k618: parklens thread is already end: %d", step);
+	} else {
+		if ((cmd != K618_PARK_STOP_POWER_DOWN) && (cmd != K618_PARK_STOP_KEEP_POWER)) {
+			CAM_DBG(CAM_OIS, "k618: Invalid stop opcode, stop parklens with power down");
+			cmd = K618_PARK_STOP_POWER_DOWN;
+		}
+		atomic_set(&o_ctrl->k618_pl_cmd, cmd);
+		CAM_DBG(CAM_OIS, "k618: wake up parklens thread to stop it (%d)", cmd);
+	}
+	wait_for_completion(&o_ctrl->k618_pl_exit);
+	atomic_set(&o_ctrl->k618_pl_state, 1);
+	o_ctrl->k618_pl_task = NULL;
+	step = atomic_read(&o_ctrl->k618_pl_step);
+	if (step)
+		CAM_DBG(CAM_OIS, "k618: parklens thread exit status: %d", step);
+	else
+		CAM_ERR(CAM_OIS, "k618: parklens thread exit failed, no status");
+	return step;
+}
+
+/*
+ * stock ois_parklens_power_down (0x15d728): 1 when the power-down is the thread's (it runs, or it
+ * ended having powered down), 0 when the caller powers down
+ */
+static int k618_park_owns_power(struct cam_ois_ctrl_t *o_ctrl)
+{
+	int state = atomic_read(&o_ctrl->k618_pl_state);
+
+	switch (state) {
+	case 0:
+		CAM_DBG(CAM_OIS, "k618: parklens is not created, power down");
+		return 0;
+	case 1:
+		if (atomic_read(&o_ctrl->k618_pl_step) > 2)
+			return 1;
+		CAM_DBG(CAM_OIS, "k618: parklens stop without power down");
+		return 0;
+	case 2:
+		CAM_DBG(CAM_OIS, "k618: parklens is running, no need powerdown");
+		return 1;
+	default:
+		CAM_ERR(CAM_OIS, "k618: Invalid parklens_state %d", state);
+		return 0;
+	}
+}
+
+/*
+ * packet 6 (stock 0x15f560-0x15f600): with no park set up and cam_ois_state CONFIG or START, the
+ * first buffer's settings become k618_pl_settings and the thread starts (its result is not
+ * returned, as stock); otherwise (0x16110c) a thread is stopped with power-down, the park torn
+ * down, -EINVAL. A parse failure deletes the settings (0x1601dc).
+ */
+static int k618_park_pkt(struct cam_ois_ctrl_t *o_ctrl, struct cam_packet *csl_packet)
+{
+	uint32_t *offset = (uint32_t *)&csl_packet->payload_flex;
+	struct cam_cmd_buf_desc *cmd_desc;
+	int pl_state = atomic_read(&o_ctrl->k618_pl_state);
+	int step = atomic_read(&o_ctrl->k618_pl_step);
+	int rc;
+
+	CAM_DBG(CAM_OIS, "k618: Received parklens buffer, parklens_state %d", pl_state);
+	if (pl_state || (o_ctrl->cam_ois_state < CAM_OIS_CONFIG)) {
+		CAM_WARN(CAM_OIS,
+			"k618: [OIS]Not in right state to do parklens: %d/%d, exit result %d release power control right",
+			o_ctrl->cam_ois_state, pl_state, step);
+		step = k618_park_stop(o_ctrl, K618_PARK_STOP_POWER_DOWN);
+		if ((step >= 3) && (step <= 5) && (o_ctrl->cam_ois_state >= CAM_OIS_CONFIG))
+			o_ctrl->cam_ois_state = CAM_OIS_ACQUIRE;	/* the thread powered it down */
+		k618_park_deinit(o_ctrl);
+		return -EINVAL;
+	}
+	offset += (csl_packet->cmd_buf_offset / sizeof(uint32_t));
+	cmd_desc = (struct cam_cmd_buf_desc *)(offset);
+	o_ctrl->k618_pl_settings.request_id = 0;
+	o_ctrl->k618_pl_settings.is_settings_valid = 1;
+	rc = cam_sensor_i2c_command_parser(&(o_ctrl->io_master_info), &(o_ctrl->k618_pl_settings),
+		cmd_desc, 1, NULL);
+	if (rc < 0) {
+		CAM_ERR(CAM_OIS, "k618: parklens settings parsing failed: %d", rc);
+		delete_request(&(o_ctrl->k618_pl_settings));
+		return rc;
+	}
+	k618_park_trigger(o_ctrl);
+	return 0;
+}
+
+/*
+ * a new INIT (stock 0x15f87c-0x15f8e8 at its power-settings buffer): stop the thread keeping the
+ * power; if it had not powered down, apply the copied entries and mark the OIS as still powered
+ * (the INIT then neither reads the power settings again nor powers up, stock 0x15fbbc, 0x1603d4);
+ * then tear the park down
+ */
+static void k618_park_on_init(struct cam_ois_ctrl_t *o_ctrl)
+{
+	struct i2c_settings_list *l;
+	int pd;
+
+	o_ctrl->k618_pl_powered = false;
+	if (!o_ctrl->k618_ultra || !atomic_read(&o_ctrl->k618_pl_state))
+		return;
+	k618_park_stop(o_ctrl, K618_PARK_STOP_KEEP_POWER);
+	pd = k618_park_owns_power(o_ctrl);
+	CAM_INFO(CAM_OIS, "k618: OIS %s: stop parklens thread, powerdown:%d", o_ctrl->ois_name, pd);
+	if (!pd) {
+		list_for_each_entry(l, &(o_ctrl->k618_pl_list.list_head), list)
+			k618_park_modes_util(&(o_ctrl->io_master_info), l);
+		o_ctrl->k618_pl_powered = true;
+	} else if (o_ctrl->cam_ois_state >= CAM_OIS_CONFIG) {
+		o_ctrl->cam_ois_state = CAM_OIS_ACQUIRE;	/* the thread powered it down */
+	}
+	k618_park_deinit(o_ctrl);
+}
+
+/* the INIT's power-up decision: false (power up as usual) unless the park left the OIS powered */
+static bool k618_park_take_power(struct cam_ois_ctrl_t *o_ctrl)
+{
+	bool powered = o_ctrl->k618_pl_powered;
+
+	o_ctrl->k618_pl_powered = false;
+	if (powered)
+		CAM_INFO(CAM_OIS, "k618: OIS %s: no need repower up again", o_ctrl->ois_name);
+	return powered;
+}
+
+/* cam_ois_pkt_parse() exit: an INIT that failed before its power-up decision powers the park's OIS down */
+static void k618_park_init_end(struct cam_ois_ctrl_t *o_ctrl)
+{
+	if (!o_ctrl->k618_pl_powered)
+		return;
+	o_ctrl->k618_pl_powered = false;
+	CAM_WARN(CAM_OIS, "k618: OIS %s: INIT ended before its power-up; powering the OIS down",
+		o_ctrl->ois_name);
+	cam_ois_power_down(o_ctrl);
+}
+
+/*
+ * RELEASE (stock 0x15ebac-0x15ee74, 0x15eee8): true when a park thread runs or has powered down
+ * -- RELEASE then neither powers down nor frees the power settings
+ */
+static bool k618_park_release(struct cam_ois_ctrl_t *o_ctrl)
+{
+	if (!o_ctrl->k618_ultra || !atomic_read(&o_ctrl->k618_pl_state))
+		return false;
+	if (k618_park_owns_power(o_ctrl) != 1)
+		return false;
+	CAM_INFO(CAM_OIS, "k618: OIS %s: CAM_RELEASE_DEV leaves the power-down to the parklens thread",
+		o_ctrl->ois_name);
+	return true;
+}
+
+/* cam_ois_shutdown(): stop a park thread with power-down; true when the thread powered down */
+static bool k618_park_shutdown(struct cam_ois_ctrl_t *o_ctrl)
+{
+	bool down;
+
+	if (!o_ctrl->k618_ultra || !atomic_read(&o_ctrl->k618_pl_state))
+		return false;
+	k618_park_stop(o_ctrl, K618_PARK_STOP_POWER_DOWN);
+	down = (k618_park_owns_power(o_ctrl) == 1);
+	k618_park_deinit(o_ctrl);
+	CAM_INFO(CAM_OIS, "k618: OIS %s: shutdown stopped the parklens thread, powered down: %d",
+		o_ctrl->ois_name, down);
+	return down;
+}
+"""
+
+EDITS += [
+# --- camera 24, park lens (draft): the 13 Ultra's OIS park-lens thread (see CAM_OIS_PARK). Packet
+# 6 brings the steps that move the lens to rest; a kernel thread applies them after the packet and
+# powers the OIS down itself, RELEASE leaving the power-down and the power settings to it; a new
+# INIT stops it keeping the power and, if it had not powered down, takes the powered OIS over.
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_dev.h",
+     "\tuint64_t k618_skip_cnt[32];\n",
+     "\tuint64_t k618_skip_cnt[32];\n"
+     "\t/* k618: camera 24, park lens (k618_park_* in cam_ois_core.c; stock offsets) */\n"
+     "\tstruct i2c_settings_array k618_pl_settings;\t/* +0xf88: packet 6's settings */\n"
+     "\tstruct i2c_settings_array k618_pl_list;\t/* +0x1248: the thread's copy of the last two */\n"
+     "\tstruct task_struct *k618_pl_task;\t/* +0x11e0 */\n"
+     "\tstruct completion k618_pl_start;\t/* +0x11e8 */\n"
+     "\tstruct completion k618_pl_exit;\t/* +0x1210 */\n"
+     "\tatomic_t k618_pl_cmd;\t/* +0x1238: 2 stop and power down, 3 stop and keep the power */\n"
+     "\tatomic_t k618_pl_step;\t/* +0x123c: 0 walking, 2..6 how the thread ended */\n"
+     "\tatomic_t k618_pl_state;\t/* +0x1240: 0 none, 1 set up, 2 thread started */\n"
+     "\tbool k618_pl_keep_power;\t/* RELEASE: the thread owns the power-down */\n"
+     "\tbool k618_pl_powered;\t/* INIT: the OIS is still powered from a stopped park */\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_dev.h",
+     "void k618_ois_ultra_setup(struct cam_ois_ctrl_t *o_ctrl);\n",
+     "void k618_ois_ultra_setup(struct cam_ois_ctrl_t *o_ctrl);\n"
+     "void k618_ois_park_setup(struct cam_ois_ctrl_t *o_ctrl);\t/* k618: camera 24, park lens */\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_soc.c",
+     "\tk618_ois_ultra_setup(o_ctrl);\t/* k618: camera 24 */\n",
+     "\tk618_ois_ultra_setup(o_ctrl);\t/* k618: camera 24 */\n"
+     "\tk618_ois_park_setup(o_ctrl);\t/* k618: camera 24, park lens */\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "static void k618_ultra_release(struct cam_ois_ctrl_t *o_ctrl);\n",
+     "static void k618_ultra_release(struct cam_ois_ctrl_t *o_ctrl);\n" + CAM_OIS_PARK_DECL),
+    # packet 6 on the 13 Ultra, ahead of camera 24's flush check (repeated here) and k618_ultra_pkt()
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\tgoto put_ref;\n"
+     "\t}\n"
+     "\n"
+     "\t/* k618: camera 24 -- stock refuses packets of a flushed request (see k618_ultra_flush_check) */\n",
+     "\t\tgoto put_ref;\n"
+     "\t}\n"
+     "\n"
+     "\t/* k618: camera 24, park lens -- packet 6 on the 13 Ultra (k618_park_pkt) */\n"
+     "\tif (o_ctrl->k618_ultra &&\n"
+     "\t\t((csl_packet->header.op_code & 0xFFFFFF) == K618_OIS_OPCODE_PARKLENS)) {\n"
+     "\t\trc = k618_ultra_flush_check(o_ctrl, csl_packet);\n"
+     "\t\tif (!rc)\n"
+     "\t\t\trc = k618_park_pkt(o_ctrl, csl_packet);\n"
+     "\t\tgoto end;\n"
+     "\t}\n"
+     "\n"
+     "\t/* k618: camera 24 -- stock refuses packets of a flushed request (see k618_ultra_flush_check) */\n"),
+    # INIT: stop a park thread before anything else of the INIT touches the OIS
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\tCAM_DBG(CAM_OIS, \"CAM_OIS_PACKET_OPCODE_INIT,num_cmd_buf %d\",\n"
+     "\t\t\tcsl_packet->num_cmd_buf);\n",
+     "\t\tCAM_DBG(CAM_OIS, \"CAM_OIS_PACKET_OPCODE_INIT,num_cmd_buf %d\",\n"
+     "\t\t\tcsl_packet->num_cmd_buf);\n"
+     "\t\tk618_park_on_init(o_ctrl);\t/* k618: camera 24, park lens */\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\t\t\tCAM_DBG(CAM_OIS,\n"
+     "\t\t\t\t\t\"Received power settings buffer\");\n"
+     "\t\t\t\trc = cam_sensor_update_power_settings(\n",
+     "\t\t\t\tCAM_DBG(CAM_OIS,\n"
+     "\t\t\t\t\t\"Received power settings buffer\");\n"
+     "\t\t\t\tif (o_ctrl->k618_pl_powered) {\n"
+     "\t\t\t\t\t/* k618: camera 24, park lens -- the powered OIS keeps its settings */\n"
+     "\t\t\t\t\tCAM_DBG(CAM_OIS, \"k618: no need repower up again\");\n"
+     "\t\t\t\t\tbreak;\n"
+     "\t\t\t\t}\n"
+     "\t\t\t\trc = cam_sensor_update_power_settings(\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\tif (o_ctrl->cam_ois_state != CAM_OIS_CONFIG) {\n"
+     "\t\t\trc = cam_ois_power_up(o_ctrl);\n",
+     "\t\t/* k618: camera 24, park lens -- not when a stopped park left the OIS powered */\n"
+     "\t\tif (!k618_park_take_power(o_ctrl) &&\n"
+     "\t\t\t(o_ctrl->cam_ois_state != CAM_OIS_CONFIG)) {\n"
+     "\t\t\trc = cam_ois_power_up(o_ctrl);\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "end:\n"
+     "\tcam_common_mem_free(csl_packet);\n",
+     "end:\n"
+     "\tk618_park_init_end(o_ctrl);\t/* k618: camera 24, park lens */\n"
+     "\tcam_common_mem_free(csl_packet);\n"),
+    # RELEASE: the thread's power-down and power settings
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\tif (o_ctrl->cam_ois_state == CAM_OIS_CONFIG) {\n"
+     "\t\t\trc = cam_ois_power_down(o_ctrl);\n",
+     "\t\t/* k618: camera 24, park lens -- a parklens thread may own the power-down */\n"
+     "\t\to_ctrl->k618_pl_keep_power = k618_park_release(o_ctrl);\n"
+     "\t\tif ((o_ctrl->cam_ois_state == CAM_OIS_CONFIG) &&\n"
+     "\t\t\t!o_ctrl->k618_pl_keep_power) {\n"
+     "\t\t\trc = cam_ois_power_down(o_ctrl);\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\tCAM_MEM_FREE(power_info->power_setting);\n"
+     "\t\tCAM_MEM_FREE(power_info->power_down_setting);\n"
+     "\t\tpower_info->power_setting = NULL;\n"
+     "\t\tpower_info->power_down_setting = NULL;\n"
+     "\t\tpower_info->power_down_setting_size = 0;\n"
+     "\t\tpower_info->power_setting_size = 0;\n",
+     "\t\tif (!o_ctrl->k618_pl_keep_power) {\t/* k618: camera 24, park lens -- else the thread's */\n"
+     "\t\t\tCAM_MEM_FREE(power_info->power_setting);\n"
+     "\t\t\tCAM_MEM_FREE(power_info->power_down_setting);\n"
+     "\t\t\tpower_info->power_setting = NULL;\n"
+     "\t\t\tpower_info->power_down_setting = NULL;\n"
+     "\t\t\tpower_info->power_down_setting_size = 0;\n"
+     "\t\t\tpower_info->power_setting_size = 0;\n"
+     "\t\t}\n"
+     "\t\to_ctrl->k618_pl_keep_power = false;\n"),
+    # shutdown: the thread first, then only the power-down it did not do
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\tstruct cam_sensor_power_ctrl_t *power_info = &soc_private->power_info;\n"
+     "\n"
+     "\tif (o_ctrl->cam_ois_state == CAM_OIS_INIT)\n"
+     "\t\treturn;\n",
+     "\tstruct cam_sensor_power_ctrl_t *power_info = &soc_private->power_info;\n"
+     "\tbool k618_park_down = k618_park_shutdown(o_ctrl);\t/* k618: camera 24, park lens */\n"
+     "\n"
+     "\tif (o_ctrl->cam_ois_state == CAM_OIS_INIT)\n"
+     "\t\treturn;\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\tif (o_ctrl->cam_ois_state >= CAM_OIS_CONFIG) {\n"
+     "\t\trc = cam_ois_power_down(o_ctrl);\n",
+     "\tif ((o_ctrl->cam_ois_state >= CAM_OIS_CONFIG) && !k618_park_down) {\t/* k618: camera 24, park lens */\n"
+     "\t\trc = cam_ois_power_down(o_ctrl);\n"),
+    # the code, after camera 24's last function
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\tCAM_INFO(CAM_OIS, \"k618: OIS %u: 13 Ultra -- request-manager device, 65-byte slave info\",\n"
+     "\t\to_ctrl->soc_info.index);\n"
+     "}\n",
+     "\tCAM_INFO(CAM_OIS, \"k618: OIS %u: 13 Ultra -- request-manager device, 65-byte slave info\",\n"
+     "\t\to_ctrl->soc_info.index);\n"
+     "}\n" + CAM_OIS_PARK),
+]
+
+
 EDITS += [
 
 
@@ -5541,6 +6200,130 @@ EDITS += [
      '\t"%s-state",\n};\n#endif /* OPLUS_FEATURE_DISPLAY */' % _fod_last_p,
      '\t"%s-state",\n' % _fod_last_p + "".join('\t"%s-state",\n' % p for _, p in MI_M1_CMD_SETS)
      + "};\n#endif /* OPLUS_FEATURE_DISPLAY */"),
+]
+
+
+# k618_mi_disp.c, section 7 of its header: the 13 Pro's 42 02 0b panel, the 13 Ultra's peak
+# HDR mode, and the panel data stock takes from the bootloader or the panel (name, white point,
+# build id). Five more command sets, appended after MI_M1_CMD_SETS' last entry by edits of their
+# own (the tree is patched in place build after build). Positional like the rest:
+#  - the 13 Pro 38 0c's build-id sub read (stock types 75/76, both timing-level, "dsi_lp_mode"),
+#    sent around its 1Dh read when DAh answers 0x40 (stock mi_dsi_display_read_panel_build_id
+#    0x1832fc / 0x1833b4);
+#  - the 13 Ultra's peak gamma read set-up, the peak gamma command (B0h..B8h, patched through its
+#    "-command-update" table) and the read set-down (stock types 125..127, "dsi_hs_mode").
+MI_U62_CMD_SETS = [
+    ("DSI_CMD_SET_MI_PANEL_BUILD_ID_SUB_WRITE_1", "mi,mdss-dsi-panel-build-id-sub-write1-command"),
+    ("DSI_CMD_SET_MI_PANEL_BUILD_ID_SUB_WRITE_2", "mi,mdss-dsi-panel-build-id-sub-write2-command"),
+    ("DSI_CMD_SET_MI_PEAK_GAMMA_READ_PRE",         "mi,mdss-dsi-peak-gamma-read-pre-command"),
+    ("DSI_CMD_SET_MI_PEAK_GAMMA",                  "mi,mdss-dsi-peak-gamma-command"),
+    ("DSI_CMD_SET_MI_PEAK_GAMMA_READ_PRE_DISABLE", "mi,mdss-dsi-peak-gamma-read-pre-disable-command"),
+]
+_m1_last_e, _m1_last_p = MI_M1_CMD_SETS[-1]
+
+EDITS += [
+    ("display-drivers/msm/dsi/dsi_defs.h",
+     "\t%s,\n\tDSI_CMD_SET_MAX\n" % _m1_last_e,
+     "\t%s,\n" % _m1_last_e + "".join("\t%s,\n" % e for e, _ in MI_U62_CMD_SETS)
+     + "\tDSI_CMD_SET_MAX\n"),
+    ("display-drivers/msm/dsi/dsi_panel.c",
+     '\t"%s",\n};\n\nconst char *cmd_set_state_map[DSI_CMD_SET_MAX] = {' % _m1_last_p,
+     '\t"%s",\n' % _m1_last_p + "".join('\t"%s",\n' % p for _, p in MI_U62_CMD_SETS)
+     + "};\n\nconst char *cmd_set_state_map[DSI_CMD_SET_MAX] = {"),
+    ("display-drivers/msm/dsi/dsi_panel.c",
+     '\t"%s-state",\n};\n#endif /* OPLUS_FEATURE_DISPLAY */' % _m1_last_p,
+     '\t"%s-state",\n' % _m1_last_p + "".join('\t"%s-state",\n' % p for _, p in MI_U62_CMD_SETS)
+     + "};\n#endif /* OPLUS_FEATURE_DISPLAY */"),
+]
+
+# dsi_display.c (k618_mi_disp.c calls these):
+#  - k618_dsi_boot_param(): msm_drm.dsi_display0/1 as the bootloader passed them -- stock's
+#    panel_info is that string after its last ',' and up to its last ':'
+#    (mi_dsi_display_get_cmdline_panel_info 0x149920);
+#  - reads with panel_lock held: stock reads the build id and the 13 Ultra's B0h..B8h right after
+#    the panel is on, under its locks (dsi_display_enable 0x154604 / 0x1544dc), and the white point
+#    on demand. dsi_display_cmd_rx()'s body becomes k618_dsi_display_cmd_rx_locked() (no panel lock)
+#    and dsi_display_cmd_rx() takes the lock around it as before; k618_dsi_display_read() is either
+#    one, the unlocked one with the display lock and host-state check of dsi_display_cmd_receive();
+#  - the continuous-splash path of dsi_display_enable() (no dsi_panel_enable() there): the same
+#    reads, as stock does them there (0x154484, 0x1544dc).
+EDITS += [
+    ("display-drivers/msm/dsi/dsi_display.c",
+     "static char dsi_display_secondary[MAX_CMDLINE_PARAM_LEN];\n",
+     "static char dsi_display_secondary[MAX_CMDLINE_PARAM_LEN];\n"
+     "\n"
+     "/* k618: msm_drm.dsi_display0/1 as the bootloader passed them (mi_disp_k618.c's panel_info) */\n"
+     "const char *k618_dsi_boot_param(int idx)\n"
+     "{\n"
+     "\treturn idx ? dsi_display_secondary : dsi_display_primary;\n"
+     "}\n"),
+    ("display-drivers/msm/dsi/dsi_display.c",
+     "static int dsi_display_cmd_rx(struct dsi_display *display,\n"
+     "\t\t\t      struct dsi_cmd_desc *cmd)\n"
+     "{\n",
+     "/* k618: dsi_display_cmd_rx() without taking panel_lock, for a caller that holds it */\n"
+     "int k618_dsi_display_cmd_rx_locked(struct dsi_display *display,\n"
+     "\t\t\t\t   struct dsi_cmd_desc *cmd)\n"
+     "{\n"),
+    ("display-drivers/msm/dsi/dsi_display.c",
+     "\t/* acquire panel_lock to make sure no commands are in progress */\n"
+     "\tdsi_panel_acquire_panel_lock(display->panel);\n",
+     "\t/* k618: panel_lock is the caller's (dsi_display_cmd_rx() below takes it) */\n"),
+    ("display-drivers/msm/dsi/dsi_display.c",
+     "release_panel_lock:\n"
+     "\tdsi_panel_release_panel_lock(display->panel);\n"
+     "\treturn rc;\n"
+     "}\n",
+     "release_panel_lock:\n"
+     "\treturn rc;\n"
+     "}\n"
+     "\n"
+     "static int dsi_display_cmd_rx(struct dsi_display *display, struct dsi_cmd_desc *cmd)\n"
+     "{\n"
+     "\tint rc;\n"
+     "\n"
+     "\tif (!display || !display->panel)\n"
+     "\t\treturn -EINVAL;\n"
+     "\t/* the panel lock, so that no command is in progress (k618: body above) */\n"
+     "\tdsi_panel_acquire_panel_lock(display->panel);\n"
+     "\trc = k618_dsi_display_cmd_rx_locked(display, cmd);\n"
+     "\tdsi_panel_release_panel_lock(display->panel);\n"
+     "\treturn rc;\n"
+     "}\n"),
+    ("display-drivers/msm/dsi/dsi_display.c",
+     "\nint dsi_display_soft_reset(void *display)\n{\n",
+     "\n"
+     "/*\n"
+     " * k618: one read for mi_disp_k618.c. panel_locked: the caller holds panel_lock with the panel\n"
+     " * on (dsi_panel_enable(), the continuous-splash path); else the display lock and the host\n"
+     " * state as dsi_display_cmd_receive() has them, then dsi_display_cmd_rx()\n"
+     " */\n"
+     "int k618_dsi_display_read(struct dsi_display *display, struct dsi_cmd_desc *cmd, bool panel_locked)\n"
+     "{\n"
+     "\tbool state = false;\n"
+     "\tint rc;\n"
+     "\n"
+     "\tif (!display || !display->panel || !cmd)\n"
+     "\t\treturn -EINVAL;\n"
+     "\tif (panel_locked)\n"
+     "\t\treturn k618_dsi_display_cmd_rx_locked(display, cmd);\n"
+     "\tmutex_lock(&display->display_lock);\n"
+     "\trc = dsi_display_ctrl_get_host_init_state(display, &state);\n"
+     "\tif (rc || !state)\n"
+     "\t\trc = -EPERM;\n"
+     "\telse\n"
+     "\t\trc = dsi_display_cmd_rx(display, cmd);\n"
+     "\tmutex_unlock(&display->display_lock);\n"
+     "\treturn rc;\n"
+     "}\n"
+     "\n"
+     "int dsi_display_soft_reset(void *display)\n{\n"),
+    ("display-drivers/msm/dsi/dsi_display.c",
+     "\t\tdisplay->panel->panel_initialized = true;\n"
+     "\t\tDSI_DEBUG(\"cont splash enabled, display enable not required\\n\");\n",
+     "\t\tdisplay->panel->panel_initialized = true;\n"
+     "\t\tDSI_DEBUG(\"cont splash enabled, display enable not required\\n\");\n"
+     "\t\tk618_mi_disp_splash(display->panel);\t/* k618: the reads stock does here */\n"),
 ]
 
 

@@ -6,6 +6,7 @@
 #ifndef _MI_DISP_K618_H_
 #define _MI_DISP_K618_H_
 
+struct dsi_cmd_desc;
 struct dsi_display;
 struct dsi_display_mode;
 struct dsi_panel;
@@ -17,7 +18,7 @@ void k618_mi_disp_exit(void);
 /* bind a DSI display (and create its disp-DSI-<n> sysfs device) when its panel is up */
 void k618_mi_disp_attach(struct dsi_display *display);
 
-/* panel enable: fire the POWER event and schedule panel-on dimming */
+/* panel enable: fire the POWER event, the reads stock does once the panel is on, panel-on dimming */
 void k618_mi_disp_panel_on(struct dsi_panel *panel);
 
 /* the panel's backlight path passes the 51h level through as a 51_brightness event */
@@ -46,5 +47,15 @@ void k618_mi_disp_post_lp(struct dsi_panel *panel, int rc);
 void k618_mi_disp_dsc(struct dsi_panel *panel, struct dsi_display_mode *mode);
 /* dsi_panel_post_switch(), panel_lock held, before DSI_CMD_SET_POST_TIMING_SWITCH */
 void k618_mi_disp_post_switch(struct dsi_panel *panel);
+
+/* reads from the panel, and the display parameters the bootloader passes */
+/* dsi_display_enable(), continuous-splash path (no dsi_panel_enable()): the same reads, no lock held */
+void k618_mi_disp_splash(struct dsi_panel *panel);
+/* in dsi_display.c: msm_drm.dsi_display0 (idx 0) / dsi_display1 (idx 1) as the bootloader passed them */
+const char *k618_dsi_boot_param(int idx);
+/* in dsi_display.c: one read; panel_locked = the caller holds panel_lock and the panel is on */
+int k618_dsi_display_read(struct dsi_display *display, struct dsi_cmd_desc *cmd, bool panel_locked);
+/* in dsi_display.c: dsi_display_cmd_rx() without taking panel_lock */
+int k618_dsi_display_cmd_rx_locked(struct dsi_display *display, struct dsi_cmd_desc *cmd);
 
 #endif /* _MI_DISP_K618_H_ */

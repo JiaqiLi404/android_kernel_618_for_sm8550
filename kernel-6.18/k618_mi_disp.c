@@ -62,7 +62,7 @@
  *        goes off in the lowest band;
  *      - M1 26h/2Fh (the flat-mode gamma choice, oriented by the panel build id) and BAh (40/30/24
  *        Hz) in the timing-switch, post-switch, flat-mode and doze commands; the build id is DAh,
- *        read once after the first panel on (msm_drm.m1_build_id= sets it instead);
+ *        read once after the first panel on (msm_drm.build_id= sets it instead);
  *      - M1 local-HBM calibration: 87h alpha by level, DFh, D0h gray levels from SMEM item 498;
  *      - M3 DC dimming (mi,dc-feature-type = "crc_skip_backlight"): no 51h below the threshold
  *        while the HAL has DC on;
@@ -70,6 +70,18 @@
  *      - AOD_TO_NORMAL for both values as stock, with the M1/M2 timing switch after it below
  *        120 Hz, and the M1 timing switch after every nolp;
  *      - flat mode on only for value 1, as stock (any other value is off).
+ *
+ *  (7) from the same .ko:
+ *      - the 13 Pro's second panel, 42 02 0b (mi,local-hbm-alpha-ctrl-aa-area): the 87h alpha of
+ *        its local-HBM commands by level (stock aa_alpha_set), the direct 51h writes around them,
+ *        dimming on again after the fingerprint area goes off, and the HBM state they read;
+ *      - the 13 Ultra's peak HDR mode (feature 27): B0h..B8h read once after panel on plus the
+ *        DT's peak values, the peak gamma command, 51h 0xfff, 26h/2Fh, no 51h while it is on;
+ *      - per panel from the panel and the bootloader instead of fixed values: the panel name
+ *        (msm_drm.dsi_display0), the white point (msm_drm.oled_wp / sec_oled_wp, else read from
+ *        the panel), the build id (DAh after panel on wherever mi,panel-build-id-read-needed; it
+ *        decides the 13 Pro's em-cycle switching), mi,max-brightness-clone and
+ *        mi,panel-on-dimming-delay; SET_LOCAL_HBM only on mi,local-hbm-enabled panels.
  *
  * Brightness, and why there is no double write: on this ROM SDM (libsdmdal, in the composer) writes
  * /sys/class/mi_display/disp-DSI-0/brightness_clone (0..max_brightness_clone). mi_disp turns that
@@ -102,6 +114,7 @@
 #include <linux/uidgid.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include <video/mipi_display.h>	/* MIPI_DSI_DCS_READ */
 
 #include "dsi_display.h"
 #include "dsi_panel.h"
@@ -144,6 +157,7 @@
 /* the 13 (M3) and 13 Ultra (M1) panels (stock feature name table .rodata+0x899e8) */
 #define DISP_FEATURE_DC                 8
 #define DISP_FEATURE_DBI                20
+#define DISP_FEATURE_PEAK_HDR_MODE      27	/* the 13 Ultra's peak HDR (stock set_disp_param 0x18cab8) */
 /* set_disp_param DISP_FEATURE_DC notifies event type 8 (stock 0x18cc74) */
 #define MI_DISP_EVENT_DC 8
 /* the fp_status (feature 12) value that keeps the panel out of AOD (stock 0x18e388) */
@@ -211,9 +225,19 @@ module_param(m1_lhbm_cal, bool, 0644);
 /* 1: the 13 Ultra's DSC rate-control values (applied while the modes are parsed, at boot) */
 static bool m1_dsc = true;
 module_param(m1_dsc, bool, 0444);
-/* -1: the 13 Ultra's build id is read from the panel (DAh); 0..255: this value is used */
-static int m1_build_id = -1;
-module_param(m1_build_id, int, 0644);
+/*
+ * -1: the build id is read from the panel (DAh) on the panels with mi,panel-build-id-read-needed
+ * (the 13 Pro's 38 0c, the 13 Ultra); 0..255: this value is used instead. It decides the 13 Pro's
+ * em-cycle switching and the 13 Ultra's 26h/2Fh and DFh choices; panel_build_id shows it.
+ */
+static int build_id = -1;
+module_param(build_id, int, 0444);
+/* 1: the 13 Ultra's peak HDR mode (feature 27) as stock; 0: the request is stored only */
+static bool m1_peak = true;
+module_param(m1_peak, bool, 0644);
+/* 1: the 42 02 0b panel's local-HBM 87h alpha and direct 51h writes as stock; 0: as parsed */
+static bool lhbm_alpha = true;
+module_param(lhbm_alpha, bool, 0644);
 /* 1: no 51h below the DC threshold while DC is on (DT crc_skip_backlight: the 13) */
 static bool dc_skip = true;
 module_param(dc_skip, bool, 0644);
@@ -272,13 +296,19 @@ struct disp_dsi_cmd_req {
 
 /* ---- parameters, read off the running 5.15 panel ---- */
 
-static char panel_name[128] = "mdss_dsi_m2_38_0c_0a_dsc_cmd";
+/* empty: from msm_drm.dsi_display0/1, else the live panel's node name (k618_panel_name()) */
+static char panel_name[128];
 module_param_string(panel_name, panel_name, sizeof(panel_name), 0444);
-static char wp[64] = "0bba0c4d";
-module_param_string(wp, wp, sizeof(wp), 0444);
-static char build_id[64] = "0xA0";
-module_param_string(build_id, build_id, sizeof(build_id), 0444);
-static uint max_brightness_clone = 16383;   /* mi,max-brightness-clone = 0x3fff */
+/*
+ * the white point under stock's parameter names, as the bootloader passes it per unit (8 hex
+ * digits, msm_drm.oled_wp=...); empty: read from the panel (k618_wp())
+ */
+static char oled_wp[64];
+module_param_string(oled_wp, oled_wp, sizeof(oled_wp), 0444);
+static char sec_oled_wp[64];
+module_param_string(sec_oled_wp, sec_oled_wp, sizeof(sec_oled_wp), 0444);
+/* 0: the panel's mi,max-brightness-clone (0xfff without it, as stock); else this value */
+static uint max_brightness_clone;
 module_param(max_brightness_clone, uint, 0444);
 static uint fps = 120;
 module_param(fps, uint, 0444);
@@ -286,9 +316,9 @@ static uint owner_uid = 1000;                /* system:system, as init's rc chow
 module_param(owner_uid, uint, 0444);
 static uint owner_gid = 1000;
 module_param(owner_gid, uint, 0444);
-/* stock mi,panel-on-dimming-delay = 0x78 */
-static uint panel_on_dimming_delay = 120;
-module_param(panel_on_dimming_delay, uint, 0644);
+/* -1: the panel's mi,panel-on-dimming-delay (0 without it, as stock; 0x78 on all four); else ms */
+static int panel_on_dimming_delay = -1;
+module_param(panel_on_dimming_delay, int, 0644);
 /* clone -> DBV fallback used ONLY while nobody is subscribed to the clone event */
 static char bl_name[32] = "panel0-backlight";
 module_param_string(bl_name, bl_name, sizeof(bl_name), 0444);
@@ -322,7 +352,6 @@ struct k618_mi {
 	spinlock_t client_lock;
 	atomic_t clone_subs;             /* clients subscribed to BRIGHTNESS_CLONE */
 	struct delayed_work dimming_work[MI_DISP_MAX];
-	struct work_struct build_id_work[MI_DISP_MAX];	/* the 13 Ultra's build id read */
 	u32 brightness_clone[MI_DISP_MAX];
 	u32 doze_brightness[MI_DISP_MAX];
 	int feature_val[MI_DISP_MAX][DISP_FEATURE_MAX];
@@ -419,7 +448,7 @@ static const struct {
 				 DSI_CMD_SET_QSYNC_OFF },
 };
 
-#define K618_UPD_ENTRIES 8	/* the M2 timings carry at most 4 triples per command */
+#define K618_UPD_ENTRIES 12	/* M2: up to 4 triples a command; the 13 Ultra peak gamma: 9 */
 #define K618_TIMINGS     16	/* cell-index range; this panel has 11 timing nodes (0..10) */
 #define K618_EM_TABLE    14	/* BDh pulse table bytes (stock requires exactly 14) */
 
@@ -439,6 +468,8 @@ struct k618_upd_set {
 #define K618_M1_LHBM_HALF	26	/* bytes per half: flat mode off, then on */
 #define K618_M1_LHBM_LEN	(2 * K618_M1_LHBM_HALF)
 #define K618_M1_BA_LEN		9	/* BAh payload of the 40/30/24 Hz timing switch */
+#define K618_PEAK_POINTS	75	/* the 13 Ultra's peak gamma: 25 points per colour */
+#define K618_PEAK_LEN		(2 * K618_PEAK_POINTS)	/* B0h..B8h payloads: 18, 18, 14 bytes, 3 times */
 
 /*
  * the 13 Ultra's per-timing values (stock mi_dsi_panel_parse_sub_timing 0x186b4c and
@@ -494,9 +525,10 @@ struct k618_bl {
 	u32 dc_thr;		/* mi,mdss-dsi-panel-dc-threshold, 440 when absent (stock panel+0xa8c) */
 	u32 last_fps;		/* the rate the last timing switch left the panel at (panel+0xbdc) */
 	struct k618_m1_timing m1t[K618_TIMINGS];	/* by cell-index, M1 only */
-	bool m1_build_read;	/* mi,panel-build-id-read-needed */
-	int m1_build_id;	/* DAh as read after panel on (stock panel+0x6cc); -1 = not read */
-	u8 m1_build_tries;
+	bool bid_needed;	/* mi,panel-build-id-read-needed (stock panel+0x97d), cleared once read */
+	int bid;		/* DAh as read after panel on (stock panel+0x6cc); -1 = not read */
+	int bid_failed;		/* reads of it that failed (k618_bid: the 38 0c's fallback) */
+	bool em_tables;	/* M2 with the 1920 Hz threshold and the three em-cycle tables */
 	u16 m1_doze_done;	/* timings whose doze 26h/2Fh were cleared (stock priv_info+0x13e0) */
 	enum dsi_cmd_set_type m1_skip;	/* skip-source set last sent (stock panel+0xc58) */
 	enum dsi_cmd_set_type m1_dbi;	/* DBI-BWG set last sent (stock panel+0xc5c) */
@@ -504,6 +536,16 @@ struct k618_bl {
 	u8 m1_lhbm[K618_M1_LHBM_LEN];	/* SMEM item 498 (stock panel+0xa48) */
 	bool m1_lhbm_valid;	/* stock panel+0xa7c */
 	int m1_smem_rc;
+
+	/* local HBM of the 42 02 0b, panel-on dimming, the 13 Ultra's peak HDR */
+	bool lhbm_enabled;	/* mi,local-hbm-enabled (stock panel+0x9fd) */
+	bool lhbm_alpha;	/* mi,local-hbm-alpha-ctrl-aa-area (stock panel+0xa09): the 42 02 0b */
+	bool lhbm_dimming;	/* the area went off, dimming on with the next level (stock 0xbe8 = 2) */
+	u32 dimming_delay;	/* mi,panel-on-dimming-delay (stock panel+0xbe4) */
+	bool peak_read;	/* the 13 Ultra's B0h..B8h read, b->peak made (stock panel+0xd90) */
+	bool peak_sent;	/* the peak gamma command sent since panel on (stock panel+0xd91) */
+	bool peak_on;		/* peak HDR on (stock feature_val[27], panel+0x958) */
+	u8 peak[K618_PEAK_LEN];	/* B0h..B8h as read plus the DT's peak values (stock panel+0xc64) */
 };
 
 static struct k618_bl k618_bls[MI_DISP_MAX];
@@ -637,19 +679,54 @@ static void k618_m1_parse_timing(struct k618_m1_timing *t, struct device_node *n
 	}
 }
 
+/*
+ * the build id: msm_drm.build_id if set, else DAh as read after panel on, 0 until then. One
+ * difference from stock: on the 13 Pro's 38 0c panel a read that FAILED gives 0xA0, the id this
+ * phone's panel answered on 5.15 -- so a 6.18 DSI read that does
+ * not work cannot take its 1920 Hz PWM switching away (stock: 0, i.e. no switching). A read that
+ * works decides, as on stock.
+ */
+static u32 k618_bid(const struct k618_bl *b)
+{
+	if (build_id >= 0 && build_id <= 0xff)
+		return build_id;
+	if (b->bid < 0 && b->is_m2 && b->bid_failed)
+		return 0xa0;
+	return b->bid < 0 ? 0 : b->bid;
+}
+
+/*
+ * stock dsi_panel_send_em_cycle_setting() / mi_dsi_update_em_cycle_cmd(): no em-cycle switching
+ * for build id 0 (not read yet, panel+0x6cc as at power-on), 0x50, 0xb0 or 0xfb. Stock reads the
+ * id before the first level is written (dsi_display_enable); so does this port (panel on).
+ */
+static void k618_em_eval(struct k618_bl *b)
+{
+	u32 bid = k618_bid(b);
+
+	b->em_capable = b->em_tables && bid && bid != 0x50 && bid != 0xb0 && bid != 0xfb;
+}
+
+/* the dimming delay: the parameter if set, else the panel's mi,panel-on-dimming-delay */
+static u32 k618_dimming_delay(const struct k618_bl *b)
+{
+	if (panel_on_dimming_delay >= 0)
+		return panel_on_dimming_delay;
+	return b ? b->dimming_delay : 0;
+}
+
 /* the panel-level properties and every timing's update tables, from the panel's DT node */
 static void k618_bl_parse(struct k618_bl *b, struct dsi_panel *panel)
 {
 	struct device_node *np = panel->panel_of_node, *timings, *child;
 	u64 panel_id = 0;
-	u8 bid = 0;
 	int i, pos = 0;
 
 	b->panel = panel;
 	b->parsed = true;
 	b->panel_state = K618_PANEL_STATE_ON;
 	b->m1_skip = b->m1_dbi = b->m1_dbi_shown = DSI_CMD_SET_MAX;
-	b->m1_build_id = -1;
+	b->bid = -1;
 	if (!np)
 		return;
 
@@ -657,6 +734,10 @@ static void k618_bl_parse(struct k618_bl *b, struct dsi_panel *panel)
 	of_property_read_u32(np, "mi,doze-hbm-dbv-level", &b->doze_hbm_dbv);
 	of_property_read_u32(np, "mi,doze-lbm-dbv-level", &b->doze_lbm_dbv);
 	of_property_read_u32(np, "mi,local-hbm-ui-ready-delay-num-frame", &b->ui_ready_frames);
+	/* stock mi_dsi_panel_parse_config() 0x180498, 0x180648, 0x180d18 */
+	b->lhbm_enabled = of_property_read_bool(np, "mi,local-hbm-enabled");
+	b->lhbm_alpha = of_property_read_bool(np, "mi,local-hbm-alpha-ctrl-aa-area");
+	of_property_read_u32(np, "mi,panel-on-dimming-delay", &b->dimming_delay);
 
 	of_property_read_u64(np, "mi,panel-id", &panel_id);
 	b->is_m2 = panel_id == K618_M2_PANEL_ID;
@@ -665,22 +746,16 @@ static void k618_bl_parse(struct k618_bl *b, struct dsi_panel *panel)
 	b->need_fod_anim = of_property_read_bool(np, "mi,need-fod-animal-in-normal-enabled");
 	of_property_read_u32(np, "mi,normal-to-aod-doze-51reg-update-value", &b->normal_to_aod_51);
 	k618_dc_parse(b, np);
-	if (b->is_m1) {
-		b->m1_build_read = of_property_read_bool(np, "mi,panel-build-id-read-needed");
+	/* stock parse_config 0x18037c; read after panel on (k618_read_build_id()) */
+	b->bid_needed = of_property_read_bool(np, "mi,panel-build-id-read-needed");
+	if (b->is_m1)
 		k618_m1_smem(b);
-	}
-	/*
-	 * stock reads the build id from the panel (DAh, mi_dsi_display_read_panel_build_id) and skips
-	 * the em-cycle logic for 0, 0x50, 0xb0 and 0xfb; this phone's panel answered 0xA0 on 5.15
-	 */
-	if (kstrtou8(build_id, 0, &bid))
-		bid = 0;
-	b->em_capable = b->is_m2 &&
+	b->em_tables = b->is_m2 &&
 		!of_property_read_u32(np, "mi,panel-1920pwm-dbv-threshold", &b->thr) && b->thr >= 3 &&
 		k618_table(np, "mi,panel-em-cycle-3pulse-gamma-paramerer", b->table_3p) &&
 		k618_table(np, "mi,panel-em-cycle-16pulse-gamma-paramerer", b->table_16p) &&
-		k618_table(np, "mi,panel-em-cycle-gamma-paramerer-auto", b->table_auto) &&
-		bid && bid != 0x50 && bid != 0xb0 && bid != 0xfb;
+		k618_table(np, "mi,panel-em-cycle-gamma-paramerer-auto", b->table_auto);
+	k618_em_eval(b);
 
 	timings = of_get_child_by_name(np, "qcom,mdss-dsi-display-timings");
 	for_each_child_of_node(timings, child) {
@@ -696,13 +771,15 @@ static void k618_bl_parse(struct k618_bl *b, struct dsi_panel *panel)
 	}
 	of_node_put(timings);
 
-	pr_info("%s: panel id %016llx, M2 %d, em-cycle %d (threshold %#x, build id %#x), %d timings, DT IC dimming %s\n",
-		panel->name, panel_id, b->is_m2, b->em_capable, b->thr, bid, pos,
+	pr_info("%s: panel id %016llx, M2 %d, em-cycle tables %d (threshold %#x), build id %s, %d timings, DT IC dimming %s\n",
+		panel->name, panel_id, b->is_m2, b->em_tables, b->thr,
+		b->bid_needed ? "read after panel on" : "not read", pos,
 		b->dt_no_ic_dimming ? "disabled" : "allowed");
 	if (b->is_m1)
-		pr_info("%s: 13 Ultra panel, build id read %s, lhbm calibration %s\n", panel->name,
-			b->m1_build_read ? "after panel on" : "not needed",
+		pr_info("%s: 13 Ultra panel, lhbm calibration %s\n", panel->name,
 			b->m1_lhbm_valid ? "from smem" : "as parsed");
+	if (b->lhbm_alpha)
+		pr_info("%s: local-HBM alpha control of the AA area\n", panel->name);
 	if (b->dc_enabled)
 		pr_info("%s: DC dimming type %u, threshold %u\n", panel->name, b->dc_type, b->dc_thr);
 }
@@ -879,28 +956,36 @@ static void k618_hbm_off_at_zero(struct k618_bl *b, struct dsi_panel *panel)
 
 /* ---- the 13 (M3) and 13 Ultra (M1) panels ---- */
 
-/* the "-command-update" table `prop` of the active timing, read on the spot (absent = no entries) */
-static bool k618_upd_now(struct dsi_panel *panel, const char *prop, struct k618_upd_set *set)
+/* the active timing's DT node -- a reference the caller puts -- or NULL */
+static struct device_node *k618_timing_node(struct dsi_panel *panel)
 {
 	struct device_node *timings, *child, *np = NULL;
 	u32 want, cell, pos = 0;
 
-	set->count = 0;
 	if (!panel->cur_mode || !panel->cur_mode->priv_info || !panel->panel_of_node)
-		return false;
+		return NULL;
 	timings = of_get_child_by_name(panel->panel_of_node, "qcom,mdss-dsi-display-timings");
 	if (!timings)
-		return false;
+		return NULL;
 	want = panel->cur_mode->mode_idx;	/* = the timing's cell-index, as k618_bl_parse() */
 	for_each_child_of_node(timings, child) {
 		cell = pos++;
 		of_property_read_u32(child, "cell-index", &cell);
 		if (cell == want) {
-			np = child;	/* the loop's reference, put below */
+			np = child;	/* the loop's reference, the caller's now */
 			break;
 		}
 	}
 	of_node_put(timings);
+	return np;
+}
+
+/* the "-command-update" table `prop` of the active timing, read on the spot (absent = no entries) */
+static bool k618_upd_now(struct dsi_panel *panel, const char *prop, struct k618_upd_set *set)
+{
+	struct device_node *np = k618_timing_node(panel);
+
+	set->count = 0;
 	if (!np)
 		return false;
 	k618_upd_parse(set, np, prop);
@@ -1009,9 +1094,7 @@ static const enum dsi_cmd_set_type k618_m1_skip_set[K618_M1_BANDS] = {
  */
 static u32 k618_m1_bid(const struct k618_bl *b)
 {
-	if (m1_build_id >= 0 && m1_build_id <= 0xff)
-		return m1_build_id;
-	return b->m1_build_id < 0 ? 0 : b->m1_build_id;
+	return k618_bid(b);
 }
 
 /* the active timing's M1 values, or NULL */
@@ -1148,8 +1231,8 @@ static const struct {
  * (0x185c30); flat mode is the HAL's state for the timing and post switch, on for flat-on and off
  * for flat-off and the doze commands; on build 0x40/0x50 the doze commands get 0/0 instead
  * (0x185c74). The timing switch also gets BAh (9 bytes) when the new mode runs at 40, 30 or 24 Hz,
- * by the rate it comes from (0x185b80). Stock's peak-HDR override (2Fh 0, 26h 7 outside 90 Hz) is
- * not here: this port has no peak-HDR mode.
+ * by the rate it comes from (0x185b80). With peak HDR on (feature 27), 2Fh 0 and 26h 7 in every
+ * one of these commands outside 90 Hz (0x185cb8).
  */
 static void k618_m1_gamma(struct k618_bl *b, struct dsi_panel *p, enum k618_m1_cmd which)
 {
@@ -1176,6 +1259,10 @@ static void k618_m1_gamma(struct k618_bl *b, struct dsi_panel *p, enum k618_m1_c
 	v26 = t->cfg26[idx];
 	if (b45 && (which == K618_M1_DOZE_HBM || which == K618_M1_DOZE_LBM))
 		v2f = v26 = 0;
+	if (b->peak_on && p->cur_mode->timing.refresh_rate != 90) {
+		v2f = 0;
+		v26 = 7;
+	}
 
 	if (which == K618_M1_TIMING_SWITCH) {
 		/* the new mode's rate: sf rate in auto mode, minimum in idle, frame rate in normal */
@@ -1306,6 +1393,218 @@ void k618_mi_disp_dsc(struct dsi_panel *panel, struct dsi_display_mode *mode)
 		mode->mode_idx, n);
 }
 
+/* ---- reads from the panel, and the 13 Ultra's peak HDR mode ---- */
+
+/* a DCS read (06h) of reg, len bytes, low-power as stock (MIPI_DSI_MODE_LPM, 0x18b2b8); panel_lock held */
+static int k618_dcs_read(struct dsi_panel *p, u8 reg, u8 *buf, u32 len)
+{
+	struct dsi_display *d = container_of(p->host, struct dsi_display, host);
+	struct dsi_cmd_desc cmd = {};
+	u8 tx = reg;
+
+	cmd.msg.type = MIPI_DSI_DCS_READ;
+	cmd.msg.tx_buf = &tx;
+	cmd.msg.tx_len = 1;
+	cmd.msg.rx_buf = buf;
+	cmd.msg.rx_len = len;
+	cmd.msg.flags = MIPI_DSI_MSG_UNICAST_COMMAND | MIPI_DSI_MSG_USE_LPM;
+	cmd.last_command = true;
+	return k618_dsi_display_read(d, &cmd, true);
+}
+
+/*
+ * a read command of the panel node in the DT blob format (06 01 00 01 00 00 01 <reg>), low-power
+ * when its "-state" is dsi_lp_mode, as stock mi_dsi_display_cmd_read_locked() takes it;
+ * locked: panel_lock held by the caller (panel on), else the display and panel locks are taken
+ */
+static int k618_dt_read(struct dsi_panel *p, const char *prop, u8 *buf, u32 len, bool locked)
+{
+	struct dsi_display *d = container_of(p->host, struct dsi_display, host);
+	struct dsi_cmd_desc cmd = {};
+	const char *state = NULL;
+	char sprop[96];
+	const u8 *blob;
+	int blen = 0;
+	u8 tx[16];
+	u32 dlen;
+
+	if (!p->panel_of_node)
+		return -ENODEV;
+	blob = of_get_property(p->panel_of_node, prop, &blen);
+	if (!blob || blen < 8)
+		return -ENOENT;
+	dlen = (blob[5] << 8) | blob[6];
+	if (!dlen || dlen > sizeof(tx) || 7 + dlen > (u32)blen)
+		return -EINVAL;
+	memcpy(tx, blob + 7, dlen);
+	snprintf(sprop, sizeof(sprop), "%s-state", prop);
+	of_property_read_string(p->panel_of_node, sprop, &state);
+	cmd.msg.type = blob[0];
+	cmd.last_command = blob[1] == 1;
+	cmd.msg.channel = blob[2];
+	cmd.msg.flags = blob[3] | MIPI_DSI_MSG_UNICAST_COMMAND;
+	if (state && !strcmp(state, "dsi_lp_mode"))
+		cmd.msg.flags |= MIPI_DSI_MSG_USE_LPM;
+	cmd.msg.tx_buf = tx;
+	cmd.msg.tx_len = dlen;
+	cmd.msg.rx_buf = buf;
+	cmd.msg.rx_len = len;
+	return k618_dsi_display_read(d, &cmd, locked);
+}
+
+/* the 13 Ultra's peak gamma registers B0h..B8h (stock .rodata+0x898f8): lengths, offsets in b->peak */
+static const u8 k618_peak_len[9] = { 18, 18, 14, 18, 18, 14, 18, 18, 14 };
+static const u8 k618_peak_off[9] = { 0, 18, 36, 50, 68, 86, 100, 118, 136 };
+
+/*
+ * stock mi_dsi_panel_read_peak_hdr_gamma() (0x18b23c), the 13 Ultra, once per boot after panel on
+ * (dsi_display_enable 0x1544dc, and dsi_display_post_enable 0x154c78 while not done), panel_lock
+ * held: the read-pre command (125), B0h..B8h read low-power (75 big-endian points), each point plus
+ * the active timing's mi,mdss-dsi-panel-peak-hdr-gamma-value (0x18b45c; the same 75 values in all
+ * nine timings), stored for the peak gamma command; then read-pre-disable (127). Stock sends 127
+ * only after a complete read and leaves the panel in the read set-up otherwise; here it goes out
+ * either way.
+ */
+static void k618_m1_peak_read(struct k618_bl *b, struct dsi_panel *p)
+{
+	u32 val[K618_PEAK_POINTS];
+	u8 raw[K618_PEAK_LEN];
+	struct device_node *np;
+	int i, rc;
+
+	if (!b->is_m1 || !m1_peak || b->peak_read || !p->panel_initialized)
+		return;
+	np = k618_timing_node(p);
+	if (!np)
+		return;
+	rc = of_property_read_u32_array(np, "mi,mdss-dsi-panel-peak-hdr-gamma-value", val,
+					K618_PEAK_POINTS);
+	of_node_put(np);
+	if (rc) {
+		pr_info("%s: no peak hdr gamma values in this timing: %d\n", p->name, rc);
+		return;
+	}
+	rc = dsi_panel_tx_cmd_set(p, DSI_CMD_SET_MI_PEAK_GAMMA_READ_PRE, false);
+	if (rc) {
+		pr_err("%s: peak gamma read-pre: %d\n", p->name, rc);
+		return;
+	}
+	for (i = 0; i < ARRAY_SIZE(k618_peak_len); i++) {
+		rc = k618_dcs_read(p, 0xb0 + i, raw + k618_peak_off[i], k618_peak_len[i]);
+		if (rc != k618_peak_len[i]) {
+			pr_err("%s: peak gamma read %02xh: %d\n", p->name, 0xb0 + i, rc);
+			break;
+		}
+	}
+	if (i == ARRAY_SIZE(k618_peak_len)) {
+		for (i = 0; i < K618_PEAK_POINTS; i++) {
+			u32 v = ((raw[2 * i] << 8) | raw[2 * i + 1]) + val[i];
+
+			b->peak[2 * i] = (v >> 8) & 0xff;
+			b->peak[2 * i + 1] = v & 0xff;
+		}
+		b->peak_read = true;
+	}
+	rc = dsi_panel_tx_cmd_set(p, DSI_CMD_SET_MI_PEAK_GAMMA_READ_PRE_DISABLE, false);
+	pr_info("%s: peak gamma %s, read-pre-disable %d\n", p->name,
+		b->peak_read ? "read" : "not read", rc);
+}
+
+/*
+ * stock mi_dsi_panel_cal_send_peak_hdr_gamma() (0x18bfb8): the B0h..B8h entries of the peak gamma
+ * command's update table get b->peak (18 or 14 bytes each), then read-pre (125) and the peak gamma
+ * command (126) go out; sent counts as done whatever it returned (0x18c1bc), until panel off
+ */
+static int k618_m1_peak_send(struct k618_bl *b, struct dsi_panel *p)
+{
+	struct k618_upd_set set;
+	int i, r, rc;
+
+	k618_upd_now(p, "mi,mdss-dsi-peak-gamma-command-update", &set);
+	for (i = 0; i < set.count; i++) {
+		const struct k618_upd *e = &set.e[i];
+
+		if (e->reg < 0xb0 || e->reg > 0xb8)
+			continue;
+		r = e->reg - 0xb0;
+		k618_patch(p, DSI_CMD_SET_MI_PEAK_GAMMA, e, b->peak + k618_peak_off[r], k618_peak_len[r]);
+	}
+	dsi_panel_tx_cmd_set(p, DSI_CMD_SET_MI_PEAK_GAMMA_READ_PRE, false);
+	rc = dsi_panel_tx_cmd_set(p, DSI_CMD_SET_MI_PEAK_GAMMA, false);
+	b->peak_sent = true;
+	return rc;
+}
+
+/* peak HDR off: the flat-off command with the normal 26h/2Fh (stock 0x18c88c, 0x186444) */
+static void k618_m1_peak_off(struct k618_bl *b, struct dsi_panel *p, const char *why)
+{
+	int rc;
+
+	b->peak_on = false;
+	if (g_mi)
+		g_mi->feature_val[k618_panel_id(p)][DISP_FEATURE_PEAK_HDR_MODE] = 0;
+	k618_m1_gamma(b, p, K618_M1_FLAT_OFF);
+	rc = dsi_panel_tx_cmd_set(p, DSI_CMD_SET_MI_FLAT_MODE_OFF, false);
+	pr_info("%s: peak hdr off (%s): %d\n", p->name, why, rc);
+}
+
+/*
+ * feature 27, stock set_disp_param (0x18cab8), the 13 Ultra: on, the level goes to 0xfff first
+ * (dsi_panel_update_backlight(): 51h and the DBI set; the remembered level stays the HAL's); the
+ * peak gamma command once per panel on; the value kept; then the flat-off command with the
+ * 26h/2Fh for the new state (0 and 7 outside 90 Hz while on) -- its result is the feature's. While
+ * on, levels are not written (k618_mi_disp_bl_pre()); level 0, a local-HBM request and panel off
+ * end it. Stock writes the peak gamma even when the read failed (an all-zero table); here on is
+ * refused then (-EIO). Other panels keep the value only.
+ */
+static int k618_peak(struct dsi_display *d, int disp_id, int val)
+{
+	struct dsi_panel *p = d->panel;
+	struct k618_bl *b;
+	u32 keep;
+	int rc = 0;
+
+	if (!p)
+		return -ENODEV;
+	mutex_lock(&p->panel_lock);
+	if (!p->panel_initialized) {
+		rc = -ENODEV;
+		goto out;
+	}
+	b = k618_bl_get(p);
+	if (!b || !b->is_m1 || !m1_peak)
+		goto out;
+	if (!b->peak_sent && !b->peak_read)
+		k618_m1_peak_read(b, p);	/* not read after panel on: once more now */
+	if (val && !b->peak_read) {
+		pr_err("%s: peak hdr on refused: B0h..B8h were not read\n", p->name);
+		rc = -EIO;
+		goto out;
+	}
+	if (val) {
+		keep = b->last_bl;
+		b->direct = true;
+		dsi_panel_set_backlight(p, 0xfff);
+		b->direct = false;
+		b->last_bl = keep;
+	}
+	if (!b->peak_sent && b->peak_read) {
+		rc = k618_m1_peak_send(b, p);
+		if (rc)
+			pr_err("%s: peak gamma: %d\n", p->name, rc);
+	}
+	b->peak_on = val != 0;
+	if (g_mi)
+		g_mi->feature_val[disp_id][DISP_FEATURE_PEAK_HDR_MODE] = val;
+	k618_m1_gamma(b, p, K618_M1_FLAT_OFF);
+	rc = dsi_panel_tx_cmd_set(p, DSI_CMD_SET_MI_FLAT_MODE_OFF, false);
+	pr_info("%s: peak hdr %d (%u Hz): %d\n", p->name, val,
+		p->cur_mode ? p->cur_mode->timing.refresh_rate : 0, rc);
+out:
+	mutex_unlock(&p->panel_lock);
+	return rc;
+}
+
 /* ---- hooks dsi_panel.c calls (panel_lock held) ---- */
 
 bool k618_mi_disp_bl_pre(struct dsi_panel *panel, u32 *bl_lvl)
@@ -1334,6 +1633,17 @@ bool k618_mi_disp_bl_pre(struct dsi_panel *panel, u32 *bl_lvl)
 			pr_debug("%s: 51h %u not sent, DC on (threshold %u)\n", panel->name, bl,
 				 b->dc_thr);
 			return false;
+		}
+		/*
+		 * stock is_backlight_set_skip() (0x186398), the 13 Ultra in peak HDR: no 51h for a
+		 * level (the panel stays at 0xfff); level 0 ends peak HDR and goes out
+		 */
+		if (b->is_m1 && b->peak_on && !b->direct && !k618_fod_lit(b, id)) {
+			if (bl) {
+				pr_debug("%s: 51h %u not sent, peak HDR on\n", panel->name, bl);
+				return false;
+			}
+			k618_m1_peak_off(b, panel, "level 0");
 		}
 		/* stock dsi_panel_update_backlight() 0x15a0f0: the 13 Ultra's sets go before 51h */
 		if (b->is_m1)
@@ -1567,8 +1877,18 @@ void k618_mi_disp_panel_off(struct dsi_panel *panel)
 	b->in_lp = false;	/* the doze level asked for stays: the next AOD sends it again */
 	b->panel_state = K618_PANEL_STATE_ON;
 	b->lhbm_on = false;
-	if (g_mi)
+	b->lhbm_dimming = false;
+	/*
+	 * stock dsi_panel_disable() 0x1641cc / 0x1642a0: peak HDR off, its gamma sent again after
+	 * the next panel on. Stock also sends the flat-off command first; this hook runs after the
+	 * panel is off, so that is left out (the next 26h/2Fh rewrite recomputes it).
+	 */
+	b->peak_on = false;
+	b->peak_sent = false;
+	if (g_mi) {
 		g_mi->feature_val[k618_panel_id(panel)][DISP_FEATURE_HBM] = 0;
+		g_mi->feature_val[k618_panel_id(panel)][DISP_FEATURE_PEAK_HDR_MODE] = 0;
+	}
 }
 
 /* ---- the feature path's brightness parts (they take panel_lock) ---- */
@@ -1606,7 +1926,8 @@ static int k618_dimming(struct dsi_display *d, int on)
  *          packet, M3's only one), 53h = 0x20 on M2, 0 on M3; send it;
  *     both: the remembered level becomes 0x7ff -- the HAL writes the real one next.
  *   M1 (0x18ce98): nothing is sent; the state is kept for the local-HBM level.
- *   Other panels: hbm-on / hbm-off as parsed.
+ *   Other panels: hbm-on / hbm-off as parsed, the state kept for the local-HBM paths (stock
+ *   keeps feature_val[HBM] on every panel; set_lhbm_fod_locked reads it, 0x18d4e0 / 0x18d544).
  */
 static int k618_hbm(struct dsi_display *d, int val)
 {
@@ -1632,6 +1953,8 @@ static int k618_hbm(struct dsi_display *d, int val)
 	if (!b || !(b->is_m2 || b->is_m3)) {
 		rc = dsi_panel_tx_cmd_set(p, val == 1 ? DSI_CMD_SET_MI_HBM_ON : DSI_CMD_SET_MI_HBM_OFF,
 					  false);
+		if (b)
+			b->hbm_on = val == 1;
 		goto out;
 	}
 	if (val == 1) {
@@ -1928,6 +2251,276 @@ static void k618_m1_lhbm(struct k618_bl *b, struct dsi_panel *p, int state,
 }
 
 /*
+ * stock .rodata+0x77254 aa_alpha_set (file offset 0x9b314 of the 5.15 msm_drm.ko): the 87h alpha of
+ * the 42 02 0b panel's local-HBM commands by level. 4096 u32 there; every one from 0x7ff on is
+ * 0xfff, so levels 0..0x7ff are kept here.
+ */
+static const u16 k618_aa_alpha[0x800] = {
+	0x000, 0x071, 0x0af, 0x0d2, 0x0f0, 0x10a, 0x121, 0x135, 0x14d, 0x15b, 0x16c, 0x17a,
+	0x188, 0x196, 0x1a4, 0x1b2, 0x1bd, 0x1cb, 0x1d6, 0x1e2, 0x1f1, 0x1fe, 0x209, 0x214,
+	0x224, 0x22c, 0x232, 0x23c, 0x246, 0x24f, 0x258, 0x261, 0x26a, 0x273, 0x27b, 0x282,
+	0x28a, 0x294, 0x29c, 0x2a4, 0x2ac, 0x2b4, 0x2bb, 0x2c5, 0x2ca, 0x2d6, 0x2dd, 0x2e4,
+	0x2ed, 0x2f6, 0x2fd, 0x302, 0x309, 0x30d, 0x314, 0x31d, 0x323, 0x326, 0x32a, 0x330,
+	0x337, 0x33d, 0x343, 0x349, 0x34f, 0x355, 0x35b, 0x361, 0x367, 0x36d, 0x372, 0x378,
+	0x37c, 0x383, 0x387, 0x38c, 0x394, 0x399, 0x39f, 0x3a4, 0x3aa, 0x3af, 0x3b4, 0x3b9,
+	0x3bf, 0x3c4, 0x3c9, 0x3ce, 0x3d3, 0x3d8, 0x3dd, 0x3e2, 0x3e7, 0x3f0, 0x3f7, 0x3fa,
+	0x401, 0x407, 0x40a, 0x40f, 0x416, 0x418, 0x41f, 0x424, 0x426, 0x42d, 0x432, 0x436,
+	0x439, 0x43f, 0x444, 0x448, 0x44b, 0x44f, 0x457, 0x45c, 0x45e, 0x463, 0x467, 0x46d,
+	0x46f, 0x476, 0x47a, 0x47c, 0x484, 0x485, 0x48d, 0x48f, 0x495, 0x495, 0x49d, 0x49f,
+	0x4a3, 0x4a9, 0x4ad, 0x4af, 0x4b7, 0x4b9, 0x4bd, 0x4c3, 0x4c5, 0x4c7, 0x4cb, 0x4d1,
+	0x4d5, 0x4db, 0x4df, 0x4e0, 0x4e6, 0x4e8, 0x4ec, 0x4f0, 0x4f5, 0x4f9, 0x4fd, 0x4ff,
+	0x504, 0x50a, 0x50c, 0x50f, 0x515, 0x519, 0x51a, 0x51e, 0x522, 0x527, 0x52b, 0x52e,
+	0x52e, 0x535, 0x537, 0x53a, 0x53e, 0x545, 0x547, 0x548, 0x54e, 0x553, 0x555, 0x558,
+	0x55a, 0x561, 0x561, 0x564, 0x567, 0x56d, 0x56e, 0x573, 0x575, 0x57a, 0x57d, 0x57f,
+	0x584, 0x589, 0x58b, 0x58e, 0x591, 0x592, 0x596, 0x597, 0x59c, 0x59f, 0x5a1, 0x5a2,
+	0x5a7, 0x5aa, 0x5ab, 0x5af, 0x5b2, 0x5b7, 0x5b8, 0x5bb, 0x5be, 0x5c0, 0x5c1, 0x5c4,
+	0x5c9, 0x5ca, 0x5cb, 0x5d4, 0x5d5, 0x5da, 0x5dd, 0x5e0, 0x5e1, 0x5e4, 0x5e6, 0x5e7,
+	0x5ec, 0x5eb, 0x5f2, 0x5f1, 0x5f4, 0x5f5, 0x5f9, 0x5fa, 0x5ff, 0x602, 0x607, 0x606,
+	0x609, 0x60c, 0x60f, 0x612, 0x613, 0x618, 0x61d, 0x61f, 0x620, 0x623, 0x626, 0x629,
+	0x62e, 0x62f, 0x634, 0x634, 0x637, 0x63a, 0x63d, 0x63c, 0x642, 0x645, 0x648, 0x649,
+	0x64e, 0x64e, 0x653, 0x658, 0x659, 0x65b, 0x65e, 0x661, 0x662, 0x66c, 0x66f, 0x670,
+	0x673, 0x677, 0x678, 0x67b, 0x67f, 0x680, 0x683, 0x685, 0x688, 0x68b, 0x691, 0x690,
+	0x695, 0x695, 0x698, 0x69b, 0x69d, 0x69c, 0x69f, 0x6a3, 0x6a4, 0x6aa, 0x6ad, 0x6ac,
+	0x6b6, 0x6b9, 0x6bb, 0x6bc, 0x6be, 0x6c1, 0x6c4, 0x6c6, 0x6cb, 0x6cb, 0x6cc, 0x6d2,
+	0x6d5, 0x6d9, 0x6da, 0x6dd, 0x6dd, 0x6e2, 0x6e2, 0x6e5, 0x6e7, 0x6ea, 0x6ec, 0x6ed,
+	0x6f1, 0x6f4, 0x6fc, 0x6fd, 0x6ff, 0x701, 0x700, 0x700, 0x703, 0x707, 0x708, 0x708,
+	0x709, 0x70b, 0x711, 0x710, 0x714, 0x713, 0x713, 0x716, 0x71a, 0x71c, 0x71d, 0x71d,
+	0x71e, 0x722, 0x722, 0x725, 0x727, 0x729, 0x72c, 0x726, 0x729, 0x72b, 0x72d, 0x730,
+	0x732, 0x734, 0x737, 0x739, 0x73b, 0x73e, 0x740, 0x73a, 0x73d, 0x73f, 0x741, 0x744,
+	0x746, 0x748, 0x74a, 0x74d, 0x74f, 0x751, 0x754, 0x74e, 0x758, 0x75a, 0x75d, 0x75f,
+	0x759, 0x75c, 0x75e, 0x760, 0x762, 0x765, 0x767, 0x769, 0x76b, 0x76e, 0x770, 0x772,
+	0x76c, 0x76e, 0x771, 0x773, 0x775, 0x777, 0x77a, 0x77c, 0x77e, 0x780, 0x782, 0x785,
+	0x787, 0x789, 0x78b, 0x78d, 0x788, 0x78a, 0x78c, 0x78e, 0x790, 0x792, 0x795, 0x797,
+	0x799, 0x79b, 0x79d, 0x79f, 0x7a1, 0x7a4, 0x7a6, 0x7a8, 0x7a2, 0x7a4, 0x7a6, 0x7a8,
+	0x7ab, 0x7ad, 0x7af, 0x7b1, 0x7b3, 0x7b5, 0x7b7, 0x7b9, 0x7bb, 0x7b6, 0x7c0, 0x7c2,
+	0x7c4, 0x7c6, 0x7c0, 0x7ca, 0x7c4, 0x7ce, 0x7c8, 0x7d2, 0x7d5, 0x7cf, 0x7d1, 0x7d3,
+	0x7d5, 0x7d7, 0x7d9, 0x7db, 0x7dd, 0x7df, 0x7e1, 0x7db, 0x7e5, 0x7df, 0x7e1, 0x7e3,
+	0x7e5, 0x7e7, 0x7e9, 0x7eb, 0x7ed, 0x7f0, 0x7f2, 0x7f4, 0x7f6, 0x7f8, 0x7fa, 0x7fc,
+	0x7fe, 0x800, 0x802, 0x804, 0x806, 0x800, 0x80a, 0x804, 0x806, 0x808, 0x812, 0x814,
+	0x80e, 0x80f, 0x811, 0x813, 0x815, 0x817, 0x819, 0x81b, 0x81d, 0x81f, 0x821, 0x823,
+	0x825, 0x827, 0x829, 0x82b, 0x82d, 0x82f, 0x831, 0x833, 0x835, 0x837, 0x839, 0x83a,
+	0x83c, 0x83e, 0x838, 0x842, 0x844, 0x846, 0x840, 0x84a, 0x844, 0x84e, 0x850, 0x851,
+	0x853, 0x855, 0x857, 0x859, 0x85b, 0x85d, 0x85f, 0x861, 0x863, 0x864, 0x866, 0x868,
+	0x86a, 0x86c, 0x86e, 0x870, 0x872, 0x873, 0x875, 0x877, 0x879, 0x87b, 0x87d, 0x87f,
+	0x881, 0x882, 0x884, 0x886, 0x888, 0x88a, 0x88c, 0x88d, 0x88f, 0x891, 0x893, 0x895,
+	0x897, 0x899, 0x89a, 0x89c, 0x89e, 0x8a0, 0x8a2, 0x8a4, 0x8a5, 0x8a7, 0x8a9, 0x8ab,
+	0x8ad, 0x8ae, 0x8b8, 0x8ba, 0x8bc, 0x8b6, 0x8bf, 0x8c1, 0x8c3, 0x8c5, 0x8c7, 0x8c8,
+	0x8ca, 0x8cc, 0x8ce, 0x8d0, 0x8d1, 0x8d3, 0x8d5, 0x8d7, 0x8d9, 0x8e2, 0x8dc, 0x8de,
+	0x8e0, 0x8e1, 0x8e3, 0x8e5, 0x8e7, 0x8e9, 0x8ea, 0x8ec, 0x8ee, 0x8f0, 0x8f1, 0x8f3,
+	0x8f5, 0x8f7, 0x900, 0x902, 0x904, 0x906, 0x907, 0x909, 0x90b, 0x90d, 0x90e, 0x910,
+	0x912, 0x914, 0x915, 0x917, 0x919, 0x91b, 0x91c, 0x91e, 0x920, 0x921, 0x923, 0x925,
+	0x927, 0x928, 0x92a, 0x92c, 0x92d, 0x937, 0x931, 0x933, 0x93c, 0x93e, 0x938, 0x939,
+	0x93b, 0x93d, 0x93f, 0x948, 0x94a, 0x944, 0x94d, 0x94f, 0x951, 0x952, 0x954, 0x956,
+	0x957, 0x959, 0x95b, 0x95d, 0x95e, 0x960, 0x962, 0x963, 0x96d, 0x967, 0x970, 0x972,
+	0x96c, 0x96d, 0x96f, 0x979, 0x97a, 0x97c, 0x97e, 0x977, 0x981, 0x983, 0x984, 0x986,
+	0x988, 0x989, 0x98b, 0x98d, 0x98e, 0x990, 0x991, 0x99b, 0x995, 0x996, 0x998, 0x99a,
+	0x99b, 0x9a5, 0x99f, 0x9a8, 0x9a2, 0x9a3, 0x9ad, 0x9af, 0x9b0, 0x9b2, 0x9ac, 0x9b5,
+	0x9b7, 0x9b8, 0x9ba, 0x9bc, 0x9bd, 0x9bf, 0x9c1, 0x9c2, 0x9c4, 0x9c5, 0x9c7, 0x9c9,
+	0x9d2, 0x9cc, 0x9d5, 0x9d7, 0x9d1, 0x9d2, 0x9dc, 0x9dd, 0x9df, 0x9e1, 0x9e2, 0x9e4,
+	0x9e5, 0x9e7, 0x9e9, 0x9ea, 0x9ec, 0x9ed, 0x9ef, 0x9f1, 0x9f2, 0x9f4, 0x9f5, 0x9f7,
+	0xa01, 0xa02, 0xa04, 0xa05, 0x9ff, 0xa08, 0xa0a, 0xa0c, 0xa0d, 0xa0f, 0xa10, 0xa12,
+	0xa13, 0xa1d, 0xa16, 0xa18, 0xa1a, 0xa1b, 0xa25, 0xa1e, 0xa28, 0xa21, 0xa2b, 0xa2d,
+	0xa2e, 0xa30, 0xa31, 0xa33, 0xa34, 0xa36, 0xa37, 0xa39, 0xa3a, 0xa3c, 0xa3e, 0xa3f,
+	0xa41, 0xa42, 0xa4c, 0xa45, 0xa4f, 0xa50, 0xa52, 0xa53, 0xa55, 0xa56, 0xa58, 0xa59,
+	0xa5b, 0xa5d, 0xa5e, 0xa60, 0xa61, 0xa63, 0xa6c, 0xa66, 0xa6c, 0xa71, 0xa6c, 0xa71,
+	0xa72, 0xa74, 0xa78, 0xa7a, 0xa7b, 0xa7d, 0xa7e, 0xa80, 0xa81, 0xa83, 0xa8a, 0xa86,
+	0xa8d, 0xa89, 0xa8d, 0xa8f, 0xa8d, 0xa8f, 0xa90, 0xa92, 0xa93, 0xa95, 0xa96, 0xa98,
+	0xa96, 0xa9b, 0xa9c, 0xa9b, 0xa9f, 0xa9e, 0xa9f, 0xaa1, 0xa9f, 0xaa1, 0xaa5, 0xaa4,
+	0xaa5, 0xaaa, 0xaa8, 0xaaa, 0xaab, 0xaac, 0xaab, 0xaaf, 0xaab, 0xaaf, 0xab1, 0xab2,
+	0xab1, 0xab5, 0xab4, 0xab5, 0xaba, 0xab8, 0xaba, 0xab8, 0xabf, 0xabe, 0xabf, 0xac4,
+	0xac5, 0xac4, 0xac8, 0xac4, 0xac8, 0xaca, 0xac8, 0xac9, 0xace, 0xacc, 0xace, 0xacf,
+	0xad1, 0xacf, 0xad4, 0xad5, 0xad3, 0xad8, 0xad6, 0xad8, 0xad9, 0xad8, 0xad9, 0xade,
+	0xadc, 0xadd, 0xae2, 0xae3, 0xae2, 0xae6, 0xae2, 0xae6, 0xae7, 0xae6, 0xae7, 0xae9,
+	0xae7, 0xaec, 0xaea, 0xaee, 0xaf0, 0xaee, 0xaf3, 0xaf1, 0xaef, 0xaf4, 0xaf5, 0xaf4,
+	0xaf8, 0xafa, 0xaf8, 0xafc, 0xafb, 0xaf9, 0xafe, 0xaff, 0xb00, 0xb02, 0xb00, 0xb02,
+	0xb03, 0xb04, 0xb03, 0xb04, 0xb06, 0xb07, 0xb08, 0xb0d, 0xb0b, 0xb0d, 0xb0e, 0xb0f,
+	0xb11, 0xb0f, 0xb11, 0xb12, 0xb13, 0xb15, 0xb13, 0xb15, 0xb19, 0xb14, 0xb1c, 0xb1d,
+	0xb1b, 0xb1d, 0xb1e, 0xb20, 0xb27, 0xb25, 0xb2a, 0xb2b, 0xb2a, 0xb28, 0xb2c, 0xb2b,
+	0xb2c, 0xb30, 0xb32, 0xb30, 0xb2f, 0xb33, 0xb31, 0xb36, 0xb37, 0xb35, 0xb3a, 0xb35,
+	0xb39, 0xb3b, 0xb3c, 0xb3b, 0xb3f, 0xb3d, 0xb3f, 0xb40, 0xb44, 0xb40, 0xb44, 0xb45,
+	0xb44, 0xb48, 0xb4a, 0xb4b, 0xb49, 0xb4e, 0xb49, 0xb4d, 0xb52, 0xb4d, 0xb51, 0xb53,
+	0xb51, 0xb55, 0xb57, 0xb55, 0xb54, 0xb56, 0xb57, 0xb58, 0xb5a, 0xb5b, 0xb5c, 0xb5e,
+	0xb5f, 0xb60, 0xb62, 0xb63, 0xb64, 0xb66, 0xb67, 0xb68, 0xb6a, 0xb6b, 0xb6c, 0xb6e,
+	0xb67, 0xb70, 0xb6a, 0xb73, 0xb74, 0xb6e, 0xb6f, 0xb70, 0xb72, 0xb7b, 0xb74, 0xb76,
+	0xb77, 0xb78, 0xb7a, 0xb7b, 0xb7c, 0xb7e, 0xb7f, 0xb80, 0xb82, 0xb83, 0xb84, 0xb86,
+	0xb87, 0xb88, 0xb89, 0xb8b, 0xb8c, 0xb85, 0xb8f, 0xb90, 0xb89, 0xb93, 0xb94, 0xb95,
+	0xb97, 0xb98, 0xb91, 0xba2, 0xba4, 0xba5, 0xba6, 0xbb0, 0xba9, 0xbaa, 0xbac, 0xbad,
+	0xbae, 0xbb7, 0xbb1, 0xbb2, 0xbb3, 0xbb5, 0xbb6, 0xbb7, 0xbb9, 0xbba, 0xbbb, 0xbbc,
+	0xbbe, 0xbbf, 0xbc0, 0xbc2, 0xbc3, 0xbc4, 0xbc5, 0xbc7, 0xbc8, 0xbc9, 0xbcb, 0xbcc,
+	0xbcd, 0xbce, 0xbc8, 0xbd1, 0xbd2, 0xbd3, 0xbcd, 0xbce, 0xbcf, 0xbd1, 0xbd2, 0xbd3,
+	0xbd4, 0xbd6, 0xbd7, 0xbd8, 0xbda, 0xbcb, 0xbcc, 0xbcd, 0xbcf, 0xbd0, 0xbd1, 0xbd2,
+	0xbd4, 0xbd5, 0xbd6, 0xbd7, 0xbd9, 0xbe2, 0xbdb, 0xbdc, 0xbde, 0xbdf, 0xbe0, 0xbe2,
+	0xbe3, 0xbdc, 0xbe5, 0xbe7, 0xbe8, 0xbe1, 0xbea, 0xbe4, 0xbe5, 0xbee, 0xbef, 0xbe9,
+	0xbf2, 0xbeb, 0xbf4, 0xbee, 0xbf7, 0xbf0, 0xbf1, 0xbf3, 0xbf4, 0xbfd, 0xbf6, 0xbf8,
+	0xc01, 0xbfa, 0xbfb, 0xbfd, 0xbfe, 0xbff, 0xc00, 0xc02, 0xc03, 0xc04, 0xc05, 0xc06,
+	0xc08, 0xc09, 0xc0a, 0xc0b, 0xc15, 0xc0e, 0xc0f, 0xc10, 0xc12, 0xc13, 0xc14, 0xc0d,
+	0xc0f, 0xc18, 0xc19, 0xc1a, 0xc13, 0xc1d, 0xc16, 0xc1f, 0xc20, 0xc1a, 0xc1b, 0xc1c,
+	0xc1d, 0xc26, 0xc20, 0xc21, 0xc22, 0xc23, 0xc25, 0xc26, 0xc27, 0xc28, 0xc29, 0xc2b,
+	0xc2c, 0xc2d, 0xc2e, 0xc30, 0xc31, 0xc32, 0xc33, 0xc34, 0xc36, 0xc37, 0xc40, 0xc41,
+	0xc3a, 0xc3c, 0xc3d, 0xc46, 0xc3f, 0xc40, 0xc42, 0xc43, 0xc4c, 0xc45, 0xc47, 0xc48,
+	0xc49, 0xc4a, 0xc4b, 0xc4d, 0xc4e, 0xc4f, 0xc50, 0xc51, 0xc53, 0xc54, 0xc55, 0xc56,
+	0xc57, 0xc59, 0xc5a, 0xc5b, 0xc5c, 0xc5d, 0xc5f, 0xc60, 0xc61, 0xc62, 0xc63, 0xc64,
+	0xc66, 0xc67, 0xc68, 0xc69, 0xc6a, 0xc6c, 0xc6d, 0xc6e, 0xc6f, 0xc70, 0xc72, 0xc73,
+	0xc74, 0xc75, 0xc76, 0xc77, 0xc79, 0xc7a, 0xc7b, 0xc7c, 0xc75, 0xc7f, 0xc80, 0xc81,
+	0xc82, 0xc7b, 0xc84, 0xc86, 0xc87, 0xc80, 0xc89, 0xc8a, 0xc84, 0xc8d, 0xc86, 0xc87,
+	0xc90, 0xc91, 0xc93, 0xc94, 0xc95, 0xc96, 0xc97, 0xc98, 0xc9a, 0xc9b, 0xc94, 0xc9d,
+	0xc96, 0xc9f, 0xca1, 0xc9a, 0xca3, 0xc9c, 0xca5, 0xca6, 0xca8, 0xca1, 0xcaa, 0xca3,
+	0xca4, 0xcad, 0xca7, 0xca8, 0xcb1, 0xcaa, 0xcb3, 0xcb4, 0xcad, 0xcaf, 0xcb8, 0xcb1,
+	0xcb2, 0xcb3, 0xcb4, 0xcb6, 0xcb7, 0xcb8, 0xcb9, 0xcc2, 0xcbb, 0xcbc, 0xcbe, 0xcbf,
+	0xcc0, 0xcc9, 0xcc2, 0xcc3, 0xcc5, 0xcc6, 0xcc7, 0xcd0, 0xcd1, 0xcca, 0xccb, 0xccd,
+	0xcd6, 0xcd7, 0xcd0, 0xcd9, 0xcd2, 0xcdb, 0xcd5, 0xcde, 0xcdf, 0xcd8, 0xce1, 0xce2,
+	0xce3, 0xcdd, 0xce6, 0xce7, 0xce8, 0xce9, 0xcea, 0xceb, 0xcec, 0xcee, 0xce7, 0xcf0,
+	0xcf1, 0xcf2, 0xcf3, 0xcf4, 0xcf6, 0xcf7, 0xcf8, 0xcf9, 0xcfa, 0xcfb, 0xcf4, 0xcf5,
+	0xcf7, 0xcf8, 0xcf9, 0xd02, 0xd03, 0xd04, 0xd05, 0xd06, 0xd08, 0xd09, 0xd0a, 0xd0b,
+	0xd0c, 0xd0d, 0xd0e, 0xd0f, 0xd11, 0xd12, 0xd13, 0xd14, 0xd15, 0xd16, 0xd17, 0xd18,
+	0xd1a, 0xd1b, 0xd1c, 0xd1d, 0xd1e, 0xd1f, 0xd20, 0xd21, 0xd22, 0xd24, 0xd25, 0xd26,
+	0xd27, 0xd28, 0xd29, 0xd2a, 0xd2b, 0xd2c, 0xd2e, 0xd2f, 0xd30, 0xd31, 0xd32, 0xd33,
+	0xd34, 0xd35, 0xd36, 0xd38, 0xd39, 0xd3a, 0xd3b, 0xd3c, 0xd3d, 0xd3e, 0xd3f, 0xd40,
+	0xd41, 0xd43, 0xd44, 0xd45, 0xd46, 0xd47, 0xd48, 0xd49, 0xd4a, 0xd4b, 0xd4c, 0xd4e,
+	0xd4f, 0xd50, 0xd51, 0xd52, 0xd4b, 0xd54, 0xd55, 0xd4e, 0xd57, 0xd58, 0xd52, 0xd5b,
+	0xd5c, 0xd55, 0xd5e, 0xd5f, 0xd58, 0xd61, 0xd62, 0xd63, 0xd64, 0xd66, 0xd67, 0xd68,
+	0xd69, 0xd6a, 0xd73, 0xd74, 0xd6d, 0xd6e, 0xd6f, 0xd70, 0xd72, 0xd7b, 0xd74, 0xd75,
+	0xd76, 0xd77, 0xd78, 0xd79, 0xd82, 0xd7b, 0xd84, 0xd7d, 0xd7f, 0xd80, 0xd81, 0xd82,
+	0xd8b, 0xd84, 0xd8d, 0xd8e, 0xd87, 0xd88, 0xd91, 0xd8a, 0xd93, 0xd94, 0xd8e, 0xd97,
+	0xd98, 0xd91, 0xd92, 0xd9b, 0xd9c, 0xd95, 0xd96, 0xd9f, 0xda0, 0xda1, 0xda2, 0xda3,
+	0xda5, 0xda6, 0xd9f, 0xda8, 0xda9, 0xdaa, 0xdab, 0xdac, 0xdad, 0xdae, 0xdaf, 0xdb0,
+	0xdb1, 0xdb2, 0xdb3, 0xdb5, 0xdb6, 0xdb7, 0xdb8, 0xdb9, 0xdba, 0xdbb, 0xdbc, 0xdbd,
+	0xdbe, 0xdbf, 0xdc0, 0xdc1, 0xdc2, 0xdc3, 0xdc4, 0xdc5, 0xdc7, 0xdc8, 0xdc9, 0xdca,
+	0xdcb, 0xdcc, 0xdcd, 0xdce, 0xdcf, 0xdd0, 0xdd1, 0xdd2, 0xddb, 0xdd4, 0xdd5, 0xdd6,
+	0xdd7, 0xdd8, 0xdd9, 0xddb, 0xddc, 0xddd, 0xdde, 0xddf, 0xde0, 0xde1, 0xde2, 0xde3,
+	0xde4, 0xde5, 0xdee, 0xdef, 0xde8, 0xdf1, 0xdea, 0xdeb, 0xdf4, 0xdf5, 0xdee, 0xdf7,
+	0xdf8, 0xdf2, 0xdfb, 0xdfc, 0xdf5, 0xdfe, 0xdff, 0xe00, 0xe01, 0xe02, 0xe03, 0xe04,
+	0xe05, 0xe06, 0xe07, 0xe08, 0xe09, 0xe0a, 0xe0b, 0xe0c, 0xe0d, 0xe0e, 0xe0f, 0xe10,
+	0xe11, 0xe12, 0xe13, 0xe14, 0xe16, 0xe17, 0xe18, 0xe19, 0xe1a, 0xe1b, 0xe1c, 0xe1d,
+	0xe1e, 0xe1f, 0xe20, 0xe21, 0xe22, 0xe23, 0xe24, 0xe25, 0xe26, 0xe2f, 0xe28, 0xe29,
+	0xe32, 0xe2b, 0xe2c, 0xe2d, 0xe2e, 0xe2f, 0xe38, 0xe39, 0xe32, 0xe33, 0xe3c, 0xe3d,
+	0xe36, 0xe3f, 0xe38, 0xe41, 0xe42, 0xe43, 0xe3c, 0xe45, 0xe47, 0xe48, 0xe49, 0xe42,
+	0xe4b, 0xe4c, 0xe4d, 0xe4e, 0xe4f, 0xe50, 0xe49, 0xe52, 0xe4b, 0xe54, 0xe55, 0xe4e,
+	0xe4f, 0xe50, 0xe59, 0xe5a, 0xe5b, 0xe5c, 0xe55, 0xe5e, 0xe5f, 0xe60, 0xe61, 0xe6a,
+	0xe63, 0xe64, 0xe6d, 0xe66, 0xe67, 0xe68, 0xe69, 0xe6a, 0xe6b, 0xe6c, 0xe6d, 0xe6e,
+	0xe6f, 0xe70, 0xe79, 0xe72, 0xe73, 0xe7c, 0xe75, 0xe7e, 0xe7f, 0xe80, 0xe81, 0xe82,
+	0xe83, 0xe84, 0xe85, 0xe7e, 0xe87, 0xe88, 0xe89, 0xe8a, 0xe8b, 0xe8c, 0xe8d, 0xe8e,
+	0xe8f, 0xe90, 0xe91, 0xe92, 0xe93, 0xe94, 0xe95, 0xe96, 0xe97, 0xe98, 0xe99, 0xe9a,
+	0xe9b, 0xe9c, 0xe9d, 0xe9e, 0xe9f, 0xea0, 0xea1, 0xea2, 0xea3, 0xeac, 0xea5, 0xea6,
+	0xea7, 0xea8, 0xea9, 0xeb2, 0xeab, 0xeac, 0xeb5, 0xeae, 0xeaf, 0xeb8, 0xeb9, 0xeba,
+	0xebb, 0xeb4, 0xebd, 0xebe, 0xebf, 0xec0, 0xec1, 0xec2, 0xebb, 0xec4, 0xec5, 0xec6,
+	0xec7, 0xec7, 0xec8, 0xec9, 0xeca, 0xecb, 0xecc, 0xecd, 0xece, 0xecf, 0xed0, 0xed1,
+	0xed2, 0xed3, 0xed4, 0xed5, 0xede, 0xed7, 0xed8, 0xee1, 0xeda, 0xedb, 0xee4, 0xee5,
+	0xede, 0xee7, 0xee0, 0xee9, 0xeea, 0xee3, 0xeec, 0xeed, 0xeee, 0xeef, 0xee8, 0xef1,
+	0xef2, 0xeeb, 0xef4, 0xeed, 0xef6, 0xef7, 0xef0, 0xef8, 0xef9, 0xefa, 0xefb, 0xefc,
+	0xefd, 0xefe, 0xeff, 0xf00, 0xf01, 0xf0a, 0xf0b, 0xf04, 0xf0d, 0xf06, 0xf07, 0xf10,
+	0xf11, 0xf0a, 0xf13, 0xf0c, 0xf0d, 0xf16, 0xf17, 0xf18, 0xf19, 0xf1a, 0xf13, 0xf1c,
+	0xf1c, 0xf1d, 0xf1e, 0xf1f, 0xf20, 0xf21, 0xf22, 0xf23, 0xf24, 0xf25, 0xf26, 0xf27,
+	0xf28, 0xf29, 0xf2a, 0xf2b, 0xf2c, 0xf2d, 0xf36, 0xf2f, 0xf30, 0xf39, 0xf32, 0xf33,
+	0xf3b, 0xf34, 0xf3d, 0xf3e, 0xf3f, 0xf38, 0xf41, 0xf42, 0xf43, 0xf44, 0xf45, 0xf46,
+	0xf47, 0xf48, 0xf49, 0xf4a, 0xf4b, 0xf4c, 0xf4d, 0xf4e, 0xf4f, 0xf4f, 0xf50, 0xf51,
+	0xf52, 0xf53, 0xf4c, 0xf55, 0xf56, 0xf57, 0xf58, 0xf59, 0xf5a, 0xf5b, 0xf5c, 0xf5d,
+	0xf5e, 0xf5f, 0xf60, 0xf69, 0xf69, 0xf6a, 0xf6b, 0xf6c, 0xf6d, 0xf6e, 0xf6f, 0xf68,
+	0xf71, 0xf72, 0xf73, 0xf74, 0xf75, 0xf76, 0xf77, 0xf78, 0xf79, 0xf79, 0xf7a, 0xf7b,
+	0xf7c, 0xf7d, 0xf7e, 0xf7f, 0xf80, 0xf81, 0xf82, 0xf83, 0xf8c, 0xf85, 0xf86, 0xf8f,
+	0xf88, 0xf90, 0xf89, 0xf8a, 0xf93, 0xf94, 0xf95, 0xf96, 0xf97, 0xf90, 0xf91, 0xf9a,
+	0xf9b, 0xf9c, 0xf9d, 0xf9e, 0xf9e, 0xf9f, 0xfa0, 0xfa1, 0xfa2, 0xfa3, 0xfa4, 0xfa5,
+	0xfa6, 0xfa7, 0xfa8, 0xfa9, 0xfaa, 0xfab, 0xfb3, 0xfac, 0xfad, 0xfae, 0xfaf, 0xfb0,
+	0xfb9, 0xfba, 0xfbb, 0xfb4, 0xfbd, 0xfbe, 0xfbf, 0xfb7, 0xfc0, 0xfc1, 0xfc2, 0xfc3,
+	0xfc4, 0xfc5, 0xfc6, 0xfc7, 0xfc8, 0xfc9, 0xfca, 0xfcb, 0xfcb, 0xfcc, 0xfcd, 0xfce,
+	0xfcf, 0xfd0, 0xfd1, 0xfda, 0xfd3, 0xfd4, 0xfd5, 0xfd6, 0xfd7, 0xfd7, 0xfd8, 0xfe1,
+	0xfda, 0xfdb, 0xfdc, 0xfdd, 0xfde, 0xfdf, 0xfe0, 0xfe9, 0xfea, 0xfea, 0xfeb, 0xfec,
+	0xfed, 0xfee, 0xfef, 0xff0, 0xff1, 0xff2, 0xff3, 0xff4, 0xff4, 0xff5, 0xff6, 0xff7,
+	0xff8, 0xff9, 0xffa, 0xffb, 0xffc, 0xffd, 0xffe, 0xfff,
+};
+
+/*
+ * stock mi_dsi_update_lhbm_cmd_87reg() (0x186468) on a panel with mi,local-hbm-alpha-ctrl-aa-area
+ * that is neither N11 nor M11 (the 42 02 0b): the first 87h entry of the command's update table
+ * gets (alpha >> 8) & 0xf, alpha & 0xff, alpha = aa_alpha_set[level] -- the level being
+ * k618_lhbm_bl()'s (1000 nit at bl_max in HBM, the doze level's dbv in LP1/LP2, else the last
+ * level; green the last level: 0x18d6b0). Its commands carry 51h 3fff: the area at full drive,
+ * the rest of the screen scaled back to the level by this alpha. Stock stops (BUG) above 0xfff;
+ * the alpha is 0xfff there.
+ */
+static void k618_lhbm_alpha(struct k618_bl *b, struct dsi_panel *p, int state,
+			    enum dsi_cmd_set_type type)
+{
+	static const struct {
+		enum dsi_cmd_set_type type;
+		const char *upd;
+	} m[] = {
+		{ DSI_CMD_SET_MI_LOCAL_HBM_NORMAL_WHITE_1000NIT,
+		  "mi,mdss-dsi-local-hbm-normal-white-1000nit-command-update" },
+		{ DSI_CMD_SET_MI_LOCAL_HBM_HLPM_WHITE_1000NIT,
+		  "mi,mdss-dsi-local-hbm-hlpm-white-1000nit-command-update" },
+		{ DSI_CMD_SET_MI_LOCAL_HBM_NORMAL_WHITE_110NIT,
+		  "mi,mdss-dsi-local-hbm-normal-white-110nit-command-update" },
+		{ DSI_CMD_SET_MI_LOCAL_HBM_HLPM_WHITE_110NIT,
+		  "mi,mdss-dsi-local-hbm-hlpm-white-110nit-command-update" },
+		{ DSI_CMD_SET_MI_LOCAL_HBM_NORMAL_GREEN_500NIT,
+		  "mi,mdss-dsi-local-hbm-normal-green-500nit-command-update" },
+	};
+	struct k618_upd_set set;
+	u32 bl, a;
+	u8 v[2];
+	int i, j;
+
+	for (i = 0; i < ARRAY_SIZE(m) && m[i].type != type; i++)
+		;
+	if (i == ARRAY_SIZE(m) || !k618_upd_now(p, m[i].upd, &set))
+		return;
+	bl = k618_lhbm_bl(b, p, state);
+	a = bl < ARRAY_SIZE(k618_aa_alpha) ? k618_aa_alpha[bl] : 0xfff;
+	v[0] = (a >> 8) & 0xf;
+	v[1] = a & 0xff;
+	for (j = 0; j < set.count; j++) {
+		if (set.e[j].reg != 0x87)
+			continue;
+		if (k618_patch(p, type, &set.e[j], v, 2))
+			pr_warn_ratelimited("%s: lhbm set %d: 87h entry (%u bytes) not patched\n",
+					    p->name, type, set.e[j].len);
+		break;
+	}
+	pr_info("%s: lhbm set %d for level %u: alpha %#x\n", p->name, type, bl, a);
+}
+
+/*
+ * stock mi_dsi_update_backlight_in_aod() (0x18819c): 51h straight to the panel as
+ * dsi_panel_update_backlight() writes it (the bytes swapped with qcom,mdss-dsi-bl-inverted-dbv)
+ */
+static void k618_bl_direct(struct dsi_panel *p, u32 lvl)
+{
+	u16 v = lvl;
+	int rc;
+
+	if (p->bl_config.bl_inverted_dbv)
+		v = ((lvl & 0xff) << 8) | ((lvl >> 8) & 0xff);
+	rc = mipi_dsi_dcs_set_display_brightness(&p->mipi_device, v);
+	if (rc < 0)
+		pr_err("%s: 51h %u: %d\n", p->name, lvl, rc);
+}
+
+/* the same with the doze level's dbv: LBM's for a DOZE_BRIGHTNESS_LBM request, HBM's for HBM, else none */
+static void k618_bl_direct_doze(struct k618_bl *b, struct dsi_panel *p)
+{
+	if (b->doze_level == DOZE_BRIGHTNESS_LBM)
+		k618_bl_direct(p, b->doze_lbm_dbv);
+	else if (b->doze_level == DOZE_BRIGHTNESS_HBM)
+		k618_bl_direct(p, b->doze_hbm_dbv);
+}
+
+/*
+ * stock mi_dsi_panel_update_last_bl_level() (0x186754): a level after the fingerprint area went off
+ * (panel+0xbe8 = 2) starts the dimming-on work, mi,panel-on-dimming-delay ms later
+ * (mi_dsi_panel_tigger_dimming_delayed_work 0x184fe4) -- the local-HBM commands leave 53h at 0x20.
+ * Stock does it on every panel; here on the 42 02 0b.
+ */
+static void k618_lhbm_dimming(struct k618_bl *b, struct dsi_panel *p)
+{
+	b->lhbm_dimming = false;
+	if (!g_mi || k618_no_ic_dimming(b))
+		return;
+	mod_delayed_work(system_wq, &g_mi->dimming_work[k618_panel_id(p)],
+			 msecs_to_jiffies(k618_dimming_delay(b)));
+}
+
+/*
  * stock set_lhbm_fod_locked() 0x18e198, after off-to-normal / off-to-hbm: at a last level in the
  * 0-30 nit band (up to 0x83) the 13 Ultra's DBI set and 51h go out again
  */
@@ -1945,7 +2538,8 @@ static void k618_m1_lhbm_off(struct k618_bl *b, struct dsi_panel *p)
  * stock mi_dsi_panel_set_lhbm_fod_locked() (0x18d3c0) for M2. The panel sets none of the alpha /
  * DFh / white-point update flags, so stock's runtime rewrites of 87h, DFh and 66h all return early
  * for it: the DT commands go out as parsed, with only the 51h of 1000 nit, HLPM and off-to-hbm
- * (and off-to-normal from AOD) patched.
+ * (and off-to-normal from AOD) patched. The 42 02 0b sets the alpha flag: k618_lhbm_alpha(), its
+ * direct 51h writes and the dimming after the area goes off.
  */
 static int k618_lhbm(struct dsi_display *d, int state)
 {
@@ -1954,7 +2548,7 @@ static int k618_lhbm(struct dsi_display *d, int state)
 	struct k618_bl *b;
 	u8 dbv[2];
 	u32 lvl;
-	bool aod, lit;
+	bool aod, lit, alpha = false;
 	int rc = 0;
 
 	if (!p)
@@ -1978,9 +2572,13 @@ static int k618_lhbm(struct dsi_display *d, int state)
 	 * calibration (k618_m1_lhbm) and DBI resend after the area goes off (0x18e198), the last
 	 * level in the plain off-to-normal command on the panels other than M2 (0x18ddd4).
 	 */
+	/* stock set_disp_param case 9 (0x18c868): a local-HBM request ends the 13 Ultra's peak HDR */
+	if (b->is_m1 && b->peak_on)
+		k618_m1_peak_off(b, p, "local hbm");
 	if (!fod)
 		goto out;
 	aod = k618_in_doze(b);
+	alpha = lhbm_alpha && b->lhbm_alpha;
 
 	switch (state) {
 	case LOCAL_HBM_NORMAL_WHITE_1000NIT:
@@ -1999,12 +2597,16 @@ static int k618_lhbm(struct dsi_display *d, int state)
 					   0x51, dbv, 2);
 		}
 		k618_m1_lhbm(b, p, state, type);
+		if (alpha)
+			k618_lhbm_alpha(b, p, state, type);
 		rc = dsi_panel_tx_cmd_set(p, type, false);
 		break;
 	case LOCAL_HBM_NORMAL_WHITE_110NIT:
 	case LOCAL_HBM_NORMAL_GREEN_500NIT:
 		type = k618_lhbm_cmd(state, b->em_16p);
 		k618_m1_lhbm(b, p, state, type);
+		if (alpha)
+			k618_lhbm_alpha(b, p, state, type);
 		rc = dsi_panel_tx_cmd_set(p, type, false);
 		break;
 	case LOCAL_HBM_HLPM_WHITE_1000NIT:
@@ -2017,12 +2619,23 @@ static int k618_lhbm(struct dsi_display *d, int state)
 				   "mi,mdss-dsi-local-hbm-hlpm-white-110nit-command-update",
 				   0x51, dbv, 2);
 		k618_m1_lhbm(b, p, state, type);
+		if (alpha) {
+			k618_lhbm_alpha(b, p, state, type);
+			k618_bl_direct_doze(b, p);	/* stock 0x18dfdc / 0x18e088 */
+		}
 		rc = dsi_panel_tx_cmd_set(p, type, false);
 		b->panel_state = K618_PANEL_STATE_ON;
 		break;
 	case LOCAL_HBM_OFF_TO_NORMAL:
 	case LOCAL_HBM_OFF_TO_NORMAL_BACKLIGHT:
 	case LOCAL_HBM_OFF_TO_NORMAL_BACKLIGHT_RESTORE:
+		/* the 42 02 0b: stock mi_dsi_update_backlight_in_aod() first (0x18d4dc, 0x18d890, 0x18d928) */
+		if (alpha) {
+			if (state == LOCAL_HBM_OFF_TO_NORMAL_BACKLIGHT)
+				k618_bl_direct_doze(b, p);
+			else
+				k618_bl_direct(p, b->last_bl);
+		}
 		if (b->hbm_on) {
 			/* back to the global HBM: off-to-hbm (63) with 51h = the last level */
 			k618_dbv2(dbv, b->last_bl);
@@ -2032,6 +2645,8 @@ static int k618_lhbm(struct dsi_display *d, int state)
 			rc = dsi_panel_tx_cmd_set(p, DSI_CMD_SET_MI_LOCAL_HBM_OFF_TO_HBM, false);
 			if (state == LOCAL_HBM_OFF_TO_NORMAL)
 				k618_m1_lhbm_off(b, p);
+			else if (alpha)
+				b->lhbm_dimming = true;	/* stock 0xbe8 = 2 for the backlight variants */
 			break;
 		}
 		/*
@@ -2057,6 +2672,13 @@ static int k618_lhbm(struct dsi_display *d, int state)
 		rc = dsi_panel_tx_cmd_set(p, type, false);
 		if (state == LOCAL_HBM_OFF_TO_NORMAL)
 			k618_m1_lhbm_off(b, p);
+		if (alpha) {
+			/* stock 0x18e194: off-to-normal with the last level; the others with the next one */
+			if (state == LOCAL_HBM_OFF_TO_NORMAL && b->last_bl)
+				k618_lhbm_dimming(b, p);
+			else
+				b->lhbm_dimming = true;
+		}
 		break;
 	default:
 		pr_debug("local hbm state %d: nothing for this panel\n", state);
@@ -2113,6 +2735,11 @@ static int k618_set_local_hbm(int disp_id, int mfp_code)
 	d = mi->disp[disp_id];
 	if (!d || !d->panel)
 		return -ENODEV;
+	/* stock mi_disp_set_local_hbm() (0x17f8a8): nothing for a panel without mi,local-hbm-enabled */
+	if (k618_bls[disp_id].parsed && !k618_bls[disp_id].lhbm_enabled) {
+		pr_debug("disp%d: not a local-HBM panel, request %d dropped\n", disp_id, mfp_code);
+		return 0;
+	}
 	aod = k618_in_doze(&k618_bls[disp_id]);
 	/* the dim capture: the HAL set LOW_BRIGHTNESS_FOD and asks for 110 nit */
 	low = mi->feature_val[disp_id][DISP_FEATURE_LOW_BRIGHTNESS_FOD] &&
@@ -2308,6 +2935,9 @@ static int k618_set_feature(int disp_id, u32 feature_id, int val)
 	case DISP_FEATURE_DBI:
 		rc = k618_dbi(d, disp_id, val);
 		break;
+	case DISP_FEATURE_PEAK_HDR_MODE:
+		rc = k618_peak(d, disp_id, val);
+		break;
 	default:
 		/*
 		 * FP_STATUS, HBM_FOD, SENSOR_LUX, LOW_BRIGHTNESS_FOD (stored: the local HBM and doze
@@ -2322,19 +2952,36 @@ static int k618_set_feature(int disp_id, u32 feature_id, int val)
 	return rc;
 }
 
+/*
+ * the brightness clone maximum (max_brightness_clone, which MiBrightness reads): stock
+ * mi,max-brightness-clone of the panel, 0xfff without it (mi_dsi_panel_parse_config 0x180f18);
+ * 0x3fff on all four panels here
+ */
+static u32 k618_max_clone(int id)
+{
+	struct dsi_display *d = g_mi && disp_ok(id) ? g_mi->disp[id] : NULL;
+	u32 v = 0xfff;
+
+	if (max_brightness_clone)
+		return max_brightness_clone;
+	if (d && d->panel && d->panel->panel_of_node)
+		of_property_read_u32(d->panel->panel_of_node, "mi,max-brightness-clone", &v);
+	return v;
+}
+
 /* clone -> DBV fallback, only while MiBrightness is not subscribed (see file header) */
 static void k618_clone_fallback(int disp_id, u32 clone)
 {
+	u32 max = k618_max_clone(disp_id);
 	struct backlight_device *bd;
 	unsigned long level;
 
-	if (atomic_read(&g_mi->clone_subs) || !max_brightness_clone)
+	if (atomic_read(&g_mi->clone_subs) || !max)
 		return;
 	bd = backlight_device_get_by_name(bl_name);
 	if (!bd)
 		return;
-	level = mult_frac((unsigned long)min(clone, max_brightness_clone),
-			  bd->props.max_brightness, max_brightness_clone);
+	level = mult_frac((unsigned long)min(clone, max), bd->props.max_brightness, max);
 	if (clone && level < min_level)
 		level = min_t(unsigned long, min_level, bd->props.max_brightness);
 	backlight_device_set_brightness(bd, level);
@@ -2345,6 +2992,11 @@ static void k618_set_clone(int disp_id, u32 clone)
 {
 	if (!disp_ok(disp_id))
 		return;
+	/*
+	 * stock mi_dsi_panel_set_brightness_clone() (0x1888d4): at most the maximum; the thermal
+	 * limit (panel+0x9a8) only without mi,thermal-dimming-flag, which all four panels set
+	 */
+	clone = min(clone, k618_max_clone(disp_id));
 	g_mi->brightness_clone[disp_id] = clone;
 	k618_notify_u32(disp_id, MI_DISP_EVENT_BRIGHTNESS_CLONE, clone);
 	k618_clone_fallback(disp_id, clone);
@@ -2366,55 +3018,71 @@ static void k618_dimming_fn(struct work_struct *w)
 }
 
 /*
- * the 13 Ultra's build id (stock mi_dsi_display_read_panel_build_id 0x183188, read in
- * dsi_display_enable() under the display lock): DAh through the panel's
- * mi,mdss-dsi-panel-build-id-read-command, once. dsi_display_cmd_receive() takes the display lock,
- * which the panel-on hook runs under, so this work item reads it once enable has returned.
+ * stock mi_dsi_display_read_panel_build_id() (0x183188), after panel on (dsi_display_enable 0x154604,
+ * and 0x154484 in its continuous-splash path) while mi,panel-build-id-read-needed: DAh through
+ * mi,mdss-dsi-panel-build-id-read-command, mi,panel-build-id-read-length bytes. 0x40 on a panel
+ * other than the 13 Ultra is replaced by the sub id (0x1832a0): sub-write-1, the
+ * mi,mdss-dsi-panel-build-id-sub-read-command read (the 38 0c: 1Dh), sub-write-2. A failed read is
+ * tried again at the next panel on, as stock. panel_lock held, the panel on.
  */
-static void k618_build_id_fn(struct work_struct *w)
+static void k618_read_build_id(struct k618_bl *b, struct dsi_panel *p)
 {
-	struct k618_mi *mi = g_mi;
-	struct dsi_display *d;
-	struct dsi_panel *p;
-	struct k618_bl *b;
-	const void *cmd;
-	u32 rlen = 1;
-	u8 val[4] = { 0 };
-	int id, len = 0, rc;
+	u8 v[4] = { 0 };
+	u32 len = 1;
+	int rc;
 
-	if (!mi)
+	if (!b->bid_needed || build_id >= 0)
 		return;
-	for (id = 0; id < MI_DISP_MAX; id++)
-		if (w == &mi->build_id_work[id])
-			break;
-	if (id == MI_DISP_MAX)
-		return;
-	d = mi->disp[id];
-	p = d ? d->panel : NULL;
-	if (!p || !p->panel_of_node)
-		return;
-	cmd = of_get_property(p->panel_of_node, "mi,mdss-dsi-panel-build-id-read-command", &len);
-	of_property_read_u32(p->panel_of_node, "mi,panel-build-id-read-length", &rlen);
-	if (!cmd || len < 8 || !rlen || rlen > sizeof(val))
-		return;
-	rc = dsi_display_cmd_receive(d, cmd, len, val, rlen, NULL);
-
-	mutex_lock(&p->panel_lock);
-	b = k618_bl_get(p);
-	if (b && b->is_m1 && b->m1_build_id < 0) {
-		if (rc > 0) {
-			b->m1_build_id = val[0];
-			pr_info("%s: build id %#x\n", p->name, val[0]);
-			if (p->panel_initialized)
-				k618_m1_doze_gamma(b, p);
+	of_property_read_u32(p->panel_of_node, "mi,panel-build-id-read-length", &len);
+	if (!len || len > sizeof(v))
+		len = 1;
+	rc = k618_dt_read(p, "mi,mdss-dsi-panel-build-id-read-command", v, len, true);
+	if (rc <= 0) {
+		if (!b->bid_failed++ && b->is_m2) {
+			k618_em_eval(b);
+			pr_warn("%s: build id read: %d -- 0xa0 used until a read works, em-cycle %d\n",
+				p->name, rc, b->em_capable);
 		} else {
-			pr_warn("%s: build id read, try %u: %d\n", p->name, b->m1_build_tries, rc);
+			pr_warn("%s: build id read: %d\n", p->name, rc);
+		}
+		return;
+	}
+	if (v[0] == 0x40 && !b->is_m1) {
+		v[0] = 0;
+		rc = dsi_panel_tx_cmd_set(p, DSI_CMD_SET_MI_PANEL_BUILD_ID_SUB_WRITE_1, false);
+		if (rc) {
+			pr_err("%s: build id sub-write-1: %d\n", p->name, rc);
+			return;
+		}
+		rc = k618_dt_read(p, "mi,mdss-dsi-panel-build-id-sub-read-command", v, len, true);
+		if (rc <= 0)
+			pr_err("%s: sub panel id read: %d\n", p->name, rc);
+		rc = dsi_panel_tx_cmd_set(p, DSI_CMD_SET_MI_PANEL_BUILD_ID_SUB_WRITE_2, false);
+		if (rc) {
+			pr_err("%s: build id sub-write-2: %d\n", p->name, rc);
+			return;
 		}
 	}
-	mutex_unlock(&p->panel_lock);
+	b->bid = v[0];
+	b->bid_needed = false;
+	k618_em_eval(b);
+	pr_info("%s: build id %#x, em-cycle %d\n", p->name, b->bid, b->em_capable);
 }
 
-/* panel enable: POWER event; panel-on dimming unless the panel disables IC dimming */
+/* what stock reads from the panel once it is on; panel_lock held */
+static void k618_first_reads(struct k618_bl *b, struct dsi_panel *p)
+{
+	if (!p->panel_initialized)
+		return;
+	k618_read_build_id(b, p);
+	k618_m1_peak_read(b, p);
+}
+
+/*
+ * panel enable (dsi_panel_enable(), panel_lock held, the panel just on): POWER event; the reads
+ * stock does after it (build id, the 13 Ultra's peak gamma); panel-on dimming unless the panel
+ * disables IC dimming
+ */
 void k618_mi_disp_panel_on(struct dsi_panel *panel)
 {
 	struct k618_mi *mi = g_mi;
@@ -2429,20 +3097,40 @@ void k618_mi_disp_panel_on(struct dsi_panel *panel)
 	id = k618_panel_id(panel);
 	k618_notify_u32(id, MI_DISP_EVENT_POWER, 1 /* SDE_MODE_DPMS_ON */);
 	b = k618_bl_get(panel);   /* dsi_panel_enable() holds panel_lock */
-	if (b && b->is_m1) {
-		/* stock dsi_panel_enable() 0x163f44: both caches cleared, the next 51h sends both sets */
-		b->m1_skip = b->m1_dbi = DSI_CMD_SET_MAX;
-		k618_m1_doze_gamma(b, panel);
-		if (b->m1_build_read && b->m1_build_id < 0 && m1_build_id < 0 &&
-		    b->m1_build_tries < 3) {
-			b->m1_build_tries++;
-			schedule_work(&mi->build_id_work[id]);
+	if (b) {
+		k618_first_reads(b, panel);
+		if (b->is_m1) {
+			/* stock dsi_panel_enable() 0x163f44: both caches cleared, the next 51h sends both */
+			b->m1_skip = b->m1_dbi = DSI_CMD_SET_MAX;
+			k618_m1_doze_gamma(b, panel);
 		}
 	}
 	if (b && k618_no_ic_dimming(b))
 		return;
 	mod_delayed_work(system_wq, &mi->dimming_work[id],
-			 msecs_to_jiffies(panel_on_dimming_delay));
+			 msecs_to_jiffies(k618_dimming_delay(b)));
+}
+
+/*
+ * dsi_display_enable(), continuous-splash path (the panel on from the bootloader, no
+ * dsi_panel_enable()): stock reads the build id and the 13 Ultra's peak gamma there too
+ * (0x154484, 0x1544dc). The caller holds no lock.
+ */
+void k618_mi_disp_splash(struct dsi_panel *panel)
+{
+	struct k618_bl *b;
+
+	if (!g_mi || !panel || !panel->host)
+		return;
+	k618_mi_disp_attach(container_of(panel->host, struct dsi_display, host));
+	mutex_lock(&panel->panel_lock);
+	b = k618_bl_get(panel);
+	if (b) {
+		k618_first_reads(b, panel);
+		if (b->is_m1)
+			k618_m1_doze_gamma(b, panel);
+	}
+	mutex_unlock(&panel->panel_lock);
 }
 
 /*
@@ -2461,8 +3149,83 @@ void k618_mi_disp_bl(struct dsi_panel *panel, u32 bl_lvl)
 	if (b) {
 		b->last_bl = b->pre_done ? b->req_bl : bl_lvl;
 		b->pre_done = false;
+		/* the 42 02 0b: the first level after the fingerprint area went off (k618_lhbm_dimming) */
+		if (b->lhbm_dimming && b->last_bl && !k618_fod_lit(b, k618_panel_id(panel)))
+			k618_lhbm_dimming(b, panel);
 	}
 	k618_notify_u32(k618_panel_id(panel), MI_DISP_EVENT_51_BRIGHTNESS, bl_lvl);
+}
+
+/* ---- what userspace reads about the panel ---- */
+
+/*
+ * panel_info / GET_PANEL_INFO: stock mi_dsi_display_read_panel_info() (0x18308c) takes
+ * msm_drm.dsi_display0/1 as the bootloader passed it ("qcom,mdss_dsi_m2_38_0c_0a_dsc_cmd:") after
+ * its last ',' and up to its last ':' (mi_dsi_display_get_cmdline_panel_info 0x149920), else the
+ * display's name after its last ','; here the bound panel's node name stands in for the latter.
+ * The 13's "qcom,global,mdss_dsi_m3_38_0c_0a_dsc_cmd" gives mdss_dsi_m3_38_0c_0a_dsc_cmd either way.
+ */
+static const char *k618_panel_name(int id, char *buf, size_t len)
+{
+	struct dsi_display *d = g_mi && disp_ok(id) ? g_mi->disp[id] : NULL;
+	const char *s, *c;
+	char *e;
+
+	if (panel_name[0])
+		return panel_name;
+	if (!disp_ok(id))
+		return "null";
+	s = k618_dsi_boot_param(id);
+	c = s ? strrchr(s, ',') : NULL;
+	if (c && c[1]) {
+		strscpy(buf, c + 1, len);
+		e = strrchr(buf, ':');
+		if (e)
+			*e = '\0';
+		return buf;
+	}
+	if (d && d->panel && d->panel->panel_of_node) {
+		s = d->panel->panel_of_node->full_name;
+		c = strrchr(s, ',');
+		strscpy(buf, c && c[1] ? c + 1 : s, len);
+		return buf;
+	}
+	return "null";
+}
+
+/*
+ * wp_info / GET_WP_INFO: stock mi_dsi_display_read_wp_info() (0x183614) -- msm_drm.oled_wp for the
+ * primary display, sec_oled_wp for the secondary, as the bootloader passed them; without one, a
+ * read from the panel: mi,mdss-dsi-panel-wp-read-command, mi,mdss-dsi-panel-wp-read-length bytes,
+ * hex from mi,mdss-dsi-panel-wp-read-index on, kept in the parameter for the next call (the 38 0c
+ * and the 13: A1h, 4 bytes; the 13 Ultra: A3h, 8 bytes; the 42 02 0b has no read command). Stock's
+ * optional wp-read-offset command is in none of these DTs.
+ */
+static int k618_wp(int id, char *out, size_t size)
+{
+	struct dsi_display *d = g_mi && disp_ok(id) ? g_mi->disp[id] : NULL;
+	char *s = id == MI_DISP_SECONDARY ? sec_oled_wp : oled_wp;
+	u32 len = 0, idx = 0, i;
+	size_t n = 0;
+	u8 buf[16];
+	int rc;
+
+	if (s[0])
+		return scnprintf(out, size, "%s\n", s);
+	if (!d || !d->panel || !d->panel->panel_of_node)
+		return -EINVAL;
+	of_property_read_u32(d->panel->panel_of_node, "mi,mdss-dsi-panel-wp-read-length", &len);
+	of_property_read_u32(d->panel->panel_of_node, "mi,mdss-dsi-panel-wp-read-index", &idx);
+	if (!len || len > sizeof(buf) || idx >= len)
+		return -EINVAL;
+	rc = k618_dt_read(d->panel, "mi,mdss-dsi-panel-wp-read-command", buf, len, false);
+	if (rc <= 0) {
+		pr_warn("disp%d: wp read: %d\n", id, rc);
+		return rc ? rc : -EIO;
+	}
+	for (i = idx; i < len && n + 3 <= sizeof(oled_wp); i++)
+		n += scnprintf(s + n, sizeof(oled_wp) - n, "%02x", buf[i]);
+	return scnprintf(out, size, "%s\n", s);
 }
 
 /* ---- char device ---- */
@@ -2661,8 +3424,9 @@ static long k618_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	}
 	case _IOC_NR(MI_DISP_IOCTL_GET_PANEL_INFO): {
 		struct disp_panel_info *r = (void *)kdata;
-		char line[160];
-		int n = scnprintf(line, sizeof(line), "panel_name=%s\n", panel_name);
+		char line[160], name[128];
+		int n = scnprintf(line, sizeof(line), "panel_name=%s\n",
+				  k618_panel_name(disp_id, name, sizeof(name)));
 
 		if (r->info && r->info_len &&
 		    copy_to_user(r->info, line, min_t(u32, r->info_len, n + 1)))
@@ -2673,8 +3437,13 @@ static long k618_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	case _IOC_NR(MI_DISP_IOCTL_GET_WP_INFO): {
 		struct disp_wp_info *r = (void *)kdata;
 		char line[80];
-		int n = scnprintf(line, sizeof(line), "%s\n", wp);
+		int n = k618_wp(disp_id, line, sizeof(line));
 
+		if (n < 0) {
+			rc = n;
+			r->info_len = 0;
+			break;
+		}
 		if (r->info && r->info_len &&
 		    copy_to_user(r->info, line, min_t(u32, r->info_len, n + 1)))
 			rc = -EFAULT;
@@ -2704,20 +3473,36 @@ static const struct file_operations k618_fops = {
 
 /* ---- the sysfs the composer reads (disp_feature/disp-DSI-0) ---- */
 
+static int k618_dev_id(struct device *d);
+
 static ssize_t panel_info_show(struct device *d, struct device_attribute *a, char *b)
-{ return sysfs_emit(b, "panel_name=%s\n", panel_name); }
+{
+	char name[128];
+
+	return sysfs_emit(b, "panel_name=%s\n", k618_panel_name(k618_dev_id(d), name, sizeof(name)));
+}
 static DEVICE_ATTR_RO(panel_info);
 static ssize_t wp_info_show(struct device *d, struct device_attribute *a, char *b)
-{ return sysfs_emit(b, "%s\n", wp); }
+{
+	return k618_wp(k618_dev_id(d), b, PAGE_SIZE);
+}
 static DEVICE_ATTR_RO(wp_info);
+/* stock mi_dsi_display_read_panel_build_id_info() (0x183584): "Unsupported" while it is 0 */
 static ssize_t panel_build_id_show(struct device *d, struct device_attribute *a, char *b)
-{ return sysfs_emit(b, "%s\n", build_id); }
+{
+	int id = k618_dev_id(d);
+	u32 bid = build_id >= 0 ? (build_id & 0xff) : 0;
+
+	if (disp_ok(id) && k618_bls[id].parsed)
+		bid = k618_bid(&k618_bls[id]);
+	return bid ? sysfs_emit(b, "0x%02X\n", bid) : sysfs_emit(b, "Unsupported\n");
+}
 static DEVICE_ATTR_RO(panel_build_id);
 static ssize_t dynamic_fps_show(struct device *d, struct device_attribute *a, char *b)
 { return sysfs_emit(b, "%u\n", fps); }
 static DEVICE_ATTR_RO(dynamic_fps);
 static ssize_t max_brightness_clone_show(struct device *d, struct device_attribute *a, char *b)
-{ return sysfs_emit(b, "%u\n", max_brightness_clone); }
+{ return sysfs_emit(b, "%u\n", k618_max_clone(k618_dev_id(d))); }
 static DEVICE_ATTR_RO(max_brightness_clone);
 
 static int k618_dev_id(struct device *d)
@@ -2890,10 +3675,8 @@ int k618_mi_disp_init(void)
 	INIT_LIST_HEAD(&mi->client_list);
 	spin_lock_init(&mi->client_lock);
 	atomic_set(&mi->clone_subs, 0);
-	for (id = 0; id < MI_DISP_MAX; id++) {
+	for (id = 0; id < MI_DISP_MAX; id++)
 		INIT_DELAYED_WORK(&mi->dimming_work[id], k618_dimming_fn);
-		INIT_WORK(&mi->build_id_work[id], k618_build_id_fn);
-	}
 
 	rc = alloc_chrdev_region(&mi->dev_id, 0, 1, "disp_feature");
 	if (rc)
@@ -2930,8 +3713,8 @@ int k618_mi_disp_init(void)
 	if (IS_ERR(mi->ddev[MI_DISP_PRIMARY]))
 		mi->ddev[MI_DISP_PRIMARY] = NULL;
 
-	pr_info("mi_display ready: /dev/mi_display/disp_feature, version %#06x, clone max %u\n",
-		MI_DISP_FEATURE_VERSION, max_brightness_clone);
+	pr_info("mi_display ready: /dev/mi_display/disp_feature, version %#06x\n",
+		MI_DISP_FEATURE_VERSION);
 	return 0;
 
 err_class:
@@ -2954,7 +3737,6 @@ void k618_mi_disp_exit(void)
 		return;
 	for (id = 0; id < MI_DISP_MAX; id++) {
 		cancel_delayed_work_sync(&mi->dimming_work[id]);
-		cancel_work_sync(&mi->build_id_work[id]);
 		if (mi->ddev[id])
 			device_unregister(mi->ddev[id]);
 	}

@@ -24990,7 +24990,7 @@ index d52a08af2a..eb082a266b 100644
 +	help
 +	  Say Y here to enable mi wireless
 diff --git a/drivers/power/supply/qti_battery_charger.c b/drivers/power/supply/qti_battery_charger.c
-index 4d4589869c..90d75fc743 100644
+index 4d4589869c..bdd4df9971 100644
 --- a/drivers/power/supply/qti_battery_charger.c
 +++ b/drivers/power/supply/qti_battery_charger.c
 @@ -1,8 +1,9 @@
@@ -25380,7 +25380,7 @@ index 4d4589869c..90d75fc743 100644
  	struct completion		ack;
  	struct completion		fw_buf_ack;
  	struct completion		fw_update_ack;
-@@ -250,35 +507,56 @@ struct battery_chg_dev {
+@@ -250,35 +507,58 @@ struct battery_chg_dev {
  	u32				*thermal_levels;
  	const char			*wls_fw_name;
  	int				curr_thermal_level;
@@ -25439,10 +25439,12 @@ index 4d4589869c..90d75fc743 100644
 +	struct notifier_block	charger_nb;		/* charger_notifier: board temperature */
 +	int			thermal_board_temp;	/* 0.1 degC, last value sent (XM 8) */
 +	struct work_struct	blank_work;		/* XM_PROP_BLANK_STATUS off the display thread */
++	struct delayed_work	k618_panel_dw;		/* k618: panel events once msm_drm is up */
++	int			k618_panel_tries;
  };
  
  static const int battery_prop_map[BATT_PROP_MAX] = {
-@@ -293,6 +571,7 @@ static const int battery_prop_map[BATT_PROP_MAX] = {
+@@ -293,6 +573,7 @@ static const int battery_prop_map[BATT_PROP_MAX] = {
  	[BATT_CURR_NOW]		= POWER_SUPPLY_PROP_CURRENT_NOW,
  	[BATT_CHG_CTRL_LIM]	= POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
  	[BATT_CHG_CTRL_LIM_MAX]	= POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
@@ -25450,7 +25452,7 @@ index 4d4589869c..90d75fc743 100644
  	[BATT_TEMP]		= POWER_SUPPLY_PROP_TEMP,
  	[BATT_TECHNOLOGY]	= POWER_SUPPLY_PROP_TECHNOLOGY,
  	[BATT_CHG_COUNTER]	= POWER_SUPPLY_PROP_CHARGE_COUNTER,
-@@ -304,9 +583,6 @@ static const int battery_prop_map[BATT_PROP_MAX] = {
+@@ -304,9 +585,6 @@ static const int battery_prop_map[BATT_PROP_MAX] = {
  	[BATT_TTE_AVG]		= POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
  	[BATT_POWER_NOW]	= POWER_SUPPLY_PROP_POWER_NOW,
  	[BATT_POWER_AVG]	= POWER_SUPPLY_PROP_POWER_AVG,
@@ -25460,7 +25462,7 @@ index 4d4589869c..90d75fc743 100644
  };
  
  static const int usb_prop_map[USB_PROP_MAX] = {
-@@ -328,8 +604,22 @@ static const int wls_prop_map[WLS_PROP_MAX] = {
+@@ -328,8 +606,22 @@ static const int wls_prop_map[WLS_PROP_MAX] = {
  	[WLS_CURR_MAX]		= POWER_SUPPLY_PROP_CURRENT_MAX,
  	[WLS_INPUT_CURR_LIMIT]	= POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
  	[WLS_CONN_TEMP]		= POWER_SUPPLY_PROP_TEMP,
@@ -25483,7 +25485,7 @@ index 4d4589869c..90d75fc743 100644
  /* Standard usb_type definitions similar to power_supply_sysfs.c */
  static const char * const power_supply_usb_type_text[] = {
  	"Unknown", "SDP", "DCP", "CDP", "ACA", "C",
-@@ -338,7 +628,7 @@ static const char * const power_supply_usb_type_text[] = {
+@@ -338,7 +630,7 @@ static const char * const power_supply_usb_type_text[] = {
  
  /* Custom usb_type definitions */
  static const char * const qc_power_supply_usb_type_text[] = {
@@ -25492,7 +25494,7 @@ index 4d4589869c..90d75fc743 100644
  };
  
  /* wireless_type definitions */
-@@ -346,6 +636,20 @@ static const char * const qc_power_supply_wls_type_text[] = {
+@@ -346,6 +638,20 @@ static const char * const qc_power_supply_wls_type_text[] = {
  	"Unknown", "BPP", "EPP", "HPP"
  };
  
@@ -25513,7 +25515,7 @@ index 4d4589869c..90d75fc743 100644
  static RAW_NOTIFIER_HEAD(hboost_notifier);
  
  int register_hboost_event_notifier(struct notifier_block *nb)
-@@ -360,18 +664,37 @@ int unregister_hboost_event_notifier(struct notifier_block *nb)
+@@ -360,18 +666,37 @@ int unregister_hboost_event_notifier(struct notifier_block *nb)
  }
  EXPORT_SYMBOL(unregister_hboost_event_notifier);
  
@@ -25554,7 +25556,7 @@ index 4d4589869c..90d75fc743 100644
  
  	reinit_completion(&bcdev->fw_buf_ack);
  	rc = pmic_glink_write(bcdev->client, data, len);
-@@ -390,7 +713,7 @@ static int battery_chg_fw_write(struct battery_chg_dev *bcdev, void *data,
+@@ -390,7 +715,7 @@ static int battery_chg_fw_write(struct battery_chg_dev *bcdev, void *data,
  }
  
  static int battery_chg_write(struct battery_chg_dev *bcdev, void *data,
@@ -25563,7 +25565,7 @@ index 4d4589869c..90d75fc743 100644
  {
  	int rc;
  
-@@ -399,44 +722,27 @@ static int battery_chg_write(struct battery_chg_dev *bcdev, void *data,
+@@ -399,44 +724,27 @@ static int battery_chg_write(struct battery_chg_dev *bcdev, void *data,
  	 * known values until it comes back up. Hence, return 0 so that
  	 * pmic_glink_write() is not attempted until pmic glink is up.
  	 */
@@ -25611,7 +25613,7 @@ index 4d4589869c..90d75fc743 100644
  	}
  	mutex_unlock(&bcdev->rw_lock);
  
-@@ -455,11 +761,13 @@ static int write_property_id(struct battery_chg_dev *bcdev,
+@@ -455,11 +763,13 @@ static int write_property_id(struct battery_chg_dev *bcdev,
  	req_msg.hdr.type = MSG_TYPE_REQ_RESP;
  	req_msg.hdr.opcode = pst->opcode_set;
  
@@ -25629,7 +25631,7 @@ index 4d4589869c..90d75fc743 100644
  }
  
  static int read_property_id(struct battery_chg_dev *bcdev,
-@@ -474,11 +782,13 @@ static int read_property_id(struct battery_chg_dev *bcdev,
+@@ -474,11 +784,13 @@ static int read_property_id(struct battery_chg_dev *bcdev,
  	req_msg.hdr.type = MSG_TYPE_REQ_RESP;
  	req_msg.hdr.opcode = pst->opcode_get;
  
@@ -25647,7 +25649,7 @@ index 4d4589869c..90d75fc743 100644
  }
  
  static int get_property_id(struct psy_state *pst,
-@@ -490,13 +800,47 @@ static int get_property_id(struct psy_state *pst,
+@@ -490,13 +802,47 @@ static int get_property_id(struct psy_state *pst,
  		if (pst->map[i] == prop)
  			return i;
  
@@ -25698,7 +25700,7 @@ index 4d4589869c..90d75fc743 100644
  static void battery_chg_notify_disable(struct battery_chg_dev *bcdev)
  {
  	struct battery_charger_set_notify_msg req_msg = { { 0 } };
-@@ -508,13 +852,14 @@ static void battery_chg_notify_disable(struct battery_chg_dev *bcdev)
+@@ -508,13 +854,14 @@ static void battery_chg_notify_disable(struct battery_chg_dev *bcdev)
  		req_msg.hdr.type = MSG_TYPE_NOTIFY;
  		req_msg.hdr.opcode = BC_DISABLE_NOTIFY_REQ;
  
@@ -25714,7 +25716,7 @@ index 4d4589869c..90d75fc743 100644
  
  static void battery_chg_notify_enable(struct battery_chg_dev *bcdev)
  {
-@@ -527,29 +872,25 @@ static void battery_chg_notify_enable(struct battery_chg_dev *bcdev)
+@@ -527,29 +874,25 @@ static void battery_chg_notify_enable(struct battery_chg_dev *bcdev)
  		req_msg.hdr.type = MSG_TYPE_NOTIFY;
  		req_msg.hdr.opcode = BC_SET_NOTIFY_REQ;
  
@@ -25746,7 +25748,7 @@ index 4d4589869c..90d75fc743 100644
  	if (state == PMIC_GLINK_STATE_UP)
  		schedule_work(&bcdev->subsys_up_work);
  	else if (state == PMIC_GLINK_STATE_DOWN)
-@@ -605,9 +946,16 @@ int qti_battery_charger_get_prop(const char *name,
+@@ -605,9 +948,16 @@ int qti_battery_charger_get_prop(const char *name,
  }
  EXPORT_SYMBOL(qti_battery_charger_get_prop);
  
@@ -25765,7 +25767,7 @@ index 4d4589869c..90d75fc743 100644
  	if (len != sizeof(*resp_msg)) {
  		pr_err("Incorrect response length %zu for opcode %#x\n", len,
  			resp_msg->hdr.opcode);
-@@ -615,10 +963,9 @@ static bool validate_message(struct battery_chg_dev *bcdev,
+@@ -615,10 +965,9 @@ static bool validate_message(struct battery_chg_dev *bcdev,
  	}
  
  	if (resp_msg->ret_code) {
@@ -25777,7 +25779,7 @@ index 4d4589869c..90d75fc743 100644
  		return false;
  	}
  
-@@ -631,6 +978,10 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
+@@ -631,6 +980,10 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
  {
  	struct battery_charger_resp_msg *resp_msg = data;
  	struct battery_model_resp_msg *model_resp_msg = data;
@@ -25788,7 +25790,7 @@ index 4d4589869c..90d75fc743 100644
  	struct wireless_fw_check_resp *fw_check_msg;
  	struct wireless_fw_push_buf_resp *fw_resp_msg;
  	struct wireless_fw_update_status *fw_update_msg;
-@@ -645,6 +996,7 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
+@@ -645,6 +998,7 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
  		/* Handle model response uniquely as it's a string */
  		if (pst->model && len == sizeof(*model_resp_msg)) {
  			memcpy(pst->model, model_resp_msg->model, MAX_STR_LEN);
@@ -25796,7 +25798,7 @@ index 4d4589869c..90d75fc743 100644
  			ack_set = true;
  			bcdev->debug_battery_detected = !strcmp(pst->model,
  					MODEL_DEBUG_BOARD);
-@@ -652,7 +1004,7 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
+@@ -652,7 +1006,7 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
  		}
  
  		/* Other response should be of same type as they've u32 value */
@@ -25805,7 +25807,7 @@ index 4d4589869c..90d75fc743 100644
  		    resp_msg->property_id < pst->prop_count) {
  			pst->prop[resp_msg->property_id] = resp_msg->value;
  			ack_set = true;
-@@ -661,7 +1013,7 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
+@@ -661,7 +1015,7 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
  		break;
  	case BC_USB_STATUS_GET:
  		pst = &bcdev->psy_list[PSY_TYPE_USB];
@@ -25814,7 +25816,7 @@ index 4d4589869c..90d75fc743 100644
  		    resp_msg->property_id < pst->prop_count) {
  			pst->prop[resp_msg->property_id] = resp_msg->value;
  			ack_set = true;
-@@ -670,26 +1022,75 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
+@@ -670,26 +1024,75 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
  		break;
  	case BC_WLS_STATUS_GET:
  		pst = &bcdev->psy_list[PSY_TYPE_WLS];
@@ -25895,7 +25897,7 @@ index 4d4589869c..90d75fc743 100644
  		ack_set = true;
  		break;
  	case BC_WLS_FW_CHECK_UPDATE:
-@@ -741,7 +1142,7 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
+@@ -741,7 +1144,7 @@ static void handle_message(struct battery_chg_dev *bcdev, void *data,
  		break;
  	}
  
@@ -25904,7 +25906,7 @@ index 4d4589869c..90d75fc743 100644
  		complete(&bcdev->ack);
  }
  
-@@ -760,21 +1161,19 @@ static void battery_chg_update_usb_type_work(struct work_struct *work)
+@@ -760,21 +1163,19 @@ static void battery_chg_update_usb_type_work(struct work_struct *work)
  		return;
  	}
  
@@ -25931,7 +25933,7 @@ index 4d4589869c..90d75fc743 100644
  	case POWER_SUPPLY_USB_TYPE_SDP:
  		usb_psy_desc.type = POWER_SUPPLY_TYPE_USB;
  		break;
-@@ -800,7 +1199,7 @@ static void battery_chg_update_usb_type_work(struct work_struct *work)
+@@ -800,7 +1201,7 @@ static void battery_chg_update_usb_type_work(struct work_struct *work)
  		usb_psy_desc.type = POWER_SUPPLY_TYPE_USB_PD;
  		break;
  	default:
@@ -25940,7 +25942,7 @@ index 4d4589869c..90d75fc743 100644
  		break;
  	}
  }
-@@ -811,9 +1210,11 @@ static void battery_chg_check_status_work(struct work_struct *work)
+@@ -811,9 +1212,11 @@ static void battery_chg_check_status_work(struct work_struct *work)
  					struct battery_chg_dev,
  					battery_check_work);
  	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_BATTERY];
@@ -25953,7 +25955,7 @@ index 4d4589869c..90d75fc743 100644
  	if (rc < 0) {
  		pr_err("Failed to read BATT_STATUS, rc=%d\n", rc);
  		return;
-@@ -822,6 +1223,23 @@ static void battery_chg_check_status_work(struct work_struct *work)
+@@ -822,6 +1225,23 @@ static void battery_chg_check_status_work(struct work_struct *work)
  	if (pst->prop[BATT_STATUS] == POWER_SUPPLY_STATUS_CHARGING) {
  		pr_debug("Battery is charging\n");
  		return;
@@ -25977,7 +25979,7 @@ index 4d4589869c..90d75fc743 100644
  	}
  
  	rc = read_property_id(bcdev, pst, BATT_CAPACITY);
-@@ -848,15 +1266,16 @@ static void battery_chg_check_status_work(struct work_struct *work)
+@@ -848,15 +1268,16 @@ static void battery_chg_check_status_work(struct work_struct *work)
  	}
  
  	if (pst->prop[BATT_VOLT_NOW] / 1000 > bcdev->shutdown_volt_mv) {
@@ -25997,7 +25999,7 @@ index 4d4589869c..90d75fc743 100644
  }
  
  static void handle_notification(struct battery_chg_dev *bcdev, void *data,
-@@ -894,6 +1313,9 @@ static void handle_notification(struct battery_chg_dev *bcdev, void *data,
+@@ -894,6 +1315,9 @@ static void handle_notification(struct battery_chg_dev *bcdev, void *data,
  	case BC_WLS_STATUS_GET:
  		pst = &bcdev->psy_list[PSY_TYPE_WLS];
  		break;
@@ -26007,7 +26009,7 @@ index 4d4589869c..90d75fc743 100644
  	default:
  		break;
  	}
-@@ -908,7 +1330,8 @@ static void handle_notification(struct battery_chg_dev *bcdev, void *data,
+@@ -908,7 +1332,8 @@ static void handle_notification(struct battery_chg_dev *bcdev, void *data,
  		 * unplugged).
  		 */
  		power_supply_changed(pst->psy);
@@ -26017,7 +26019,7 @@ index 4d4589869c..90d75fc743 100644
  	}
  }
  
-@@ -920,14 +1343,11 @@ static int battery_chg_callback(void *priv, void *data, size_t len)
+@@ -920,14 +1345,11 @@ static int battery_chg_callback(void *priv, void *data, size_t len)
  	pr_debug("owner: %u type: %u opcode: %#x len: %zu\n", hdr->owner,
  		hdr->type, hdr->opcode, len);
  
@@ -26033,7 +26035,7 @@ index 4d4589869c..90d75fc743 100644
  
  	if (hdr->opcode == BC_NOTIFY_IND)
  		handle_notification(bcdev, data, len);
-@@ -947,6 +1367,11 @@ static int wls_psy_get_prop(struct power_supply *psy,
+@@ -947,6 +1369,11 @@ static int wls_psy_get_prop(struct power_supply *psy,
  
  	pval->intval = -ENODATA;
  
@@ -26045,7 +26047,7 @@ index 4d4589869c..90d75fc743 100644
  	prop_id = get_property_id(pst, prop);
  	if (prop_id < 0)
  		return prop_id;
-@@ -957,6 +1382,13 @@ static int wls_psy_get_prop(struct power_supply *psy,
+@@ -957,6 +1384,13 @@ static int wls_psy_get_prop(struct power_supply *psy,
  
  	pval->intval = pst->prop[prop_id];
  
@@ -26059,7 +26061,7 @@ index 4d4589869c..90d75fc743 100644
  	return 0;
  }
  
-@@ -981,6 +1413,7 @@ static enum power_supply_property wls_props[] = {
+@@ -981,6 +1415,7 @@ static enum power_supply_property wls_props[] = {
  	POWER_SUPPLY_PROP_CURRENT_MAX,
  	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
  	POWER_SUPPLY_PROP_TEMP,
@@ -26067,7 +26069,7 @@ index 4d4589869c..90d75fc743 100644
  };
  
  static const struct power_supply_desc wls_psy_desc = {
-@@ -1006,7 +1439,7 @@ static const char *get_usb_type_name(u32 usb_type)
+@@ -1006,7 +1441,7 @@ static const char *get_usb_type_name(u32 usb_type)
  	u32 i;
  
  	if (usb_type >= QTI_POWER_SUPPLY_USB_TYPE_HVDCP &&
@@ -26076,7 +26078,7 @@ index 4d4589869c..90d75fc743 100644
  		for (i = 0; i < ARRAY_SIZE(qc_power_supply_usb_type_text);
  		     i++) {
  			if (i == (usb_type - QTI_POWER_SUPPLY_USB_TYPE_HVDCP))
-@@ -1023,6 +1456,258 @@ static const char *get_usb_type_name(u32 usb_type)
+@@ -1023,6 +1458,258 @@ static const char *get_usb_type_name(u32 usb_type)
  	return "Unknown";
  }
  
@@ -26335,7 +26337,7 @@ index 4d4589869c..90d75fc743 100644
  static int usb_psy_set_icl(struct battery_chg_dev *bcdev, u32 prop_id, int val)
  {
  	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_USB];
-@@ -1035,16 +1720,10 @@ static int usb_psy_set_icl(struct battery_chg_dev *bcdev, u32 prop_id, int val)
+@@ -1035,16 +1722,10 @@ static int usb_psy_set_icl(struct battery_chg_dev *bcdev, u32 prop_id, int val)
  		return rc;
  	}
  
@@ -26355,7 +26357,7 @@ index 4d4589869c..90d75fc743 100644
  
  	/*
  	 * Input current limit (ICL) can be set by different clients. E.g. USB
-@@ -1090,6 +1769,13 @@ static int usb_psy_get_prop(struct power_supply *psy,
+@@ -1090,6 +1771,13 @@ static int usb_psy_get_prop(struct power_supply *psy,
  	if (prop == POWER_SUPPLY_PROP_TEMP)
  		pval->intval = DIV_ROUND_CLOSEST((int)pval->intval, 10);
  
@@ -26369,7 +26371,7 @@ index 4d4589869c..90d75fc743 100644
  	return 0;
  }
  
-@@ -1160,114 +1846,8 @@ static struct power_supply_desc usb_psy_desc = {
+@@ -1160,114 +1848,8 @@ static struct power_supply_desc usb_psy_desc = {
  	.property_is_writeable	= usb_psy_prop_is_writeable,
  };
  
@@ -26486,7 +26488,7 @@ index 4d4589869c..90d75fc743 100644
  {
  	int rc;
  
-@@ -1292,8 +1872,10 @@ static int battery_psy_set_charge_current(struct battery_chg_dev *bcdev,
+@@ -1292,8 +1874,10 @@ static int battery_psy_set_charge_current(struct battery_chg_dev *bcdev,
  					int val)
  {
  	int rc;
@@ -26498,7 +26500,7 @@ index 4d4589869c..90d75fc743 100644
  	if (!bcdev->num_thermal_levels)
  		return 0;
  
-@@ -1302,9 +1884,19 @@ static int battery_psy_set_charge_current(struct battery_chg_dev *bcdev,
+@@ -1302,9 +1886,19 @@ static int battery_psy_set_charge_current(struct battery_chg_dev *bcdev,
  		return -EINVAL;
  	}
  
@@ -26519,7 +26521,7 @@ index 4d4589869c..90d75fc743 100644
  	if (bcdev->thermal_fcc_step == 0)
  		fcc_ua = bcdev->thermal_levels[val];
  	else
-@@ -1319,6 +1911,25 @@ static int battery_psy_set_charge_current(struct battery_chg_dev *bcdev,
+@@ -1319,6 +1913,25 @@ static int battery_psy_set_charge_current(struct battery_chg_dev *bcdev,
  		bcdev->curr_thermal_level = val;
  	else
  		bcdev->thermal_fcc_ua = prev_fcc_ua;
@@ -26545,7 +26547,7 @@ index 4d4589869c..90d75fc743 100644
  
  	return rc;
  }
-@@ -1353,14 +1964,27 @@ static int battery_psy_get_prop(struct power_supply *psy,
+@@ -1353,14 +1966,27 @@ static int battery_psy_get_prop(struct power_supply *psy,
  		pval->strval = pst->model;
  		break;
  	case POWER_SUPPLY_PROP_CAPACITY:
@@ -26576,7 +26578,7 @@ index 4d4589869c..90d75fc743 100644
  	default:
  		pval->intval = pst->prop[prop_id];
  		break;
-@@ -1374,14 +1998,19 @@ static int battery_psy_set_prop(struct power_supply *psy,
+@@ -1374,14 +2000,19 @@ static int battery_psy_set_prop(struct power_supply *psy,
  		const union power_supply_propval *pval)
  {
  	struct battery_chg_dev *bcdev = power_supply_get_drvdata(psy);
@@ -26602,7 +26604,7 @@ index 4d4589869c..90d75fc743 100644
  	default:
  		return -EINVAL;
  	}
-@@ -1393,8 +2022,8 @@ static int battery_psy_prop_is_writeable(struct power_supply *psy,
+@@ -1393,8 +2024,8 @@ static int battery_psy_prop_is_writeable(struct power_supply *psy,
  		enum power_supply_property prop)
  {
  	switch (prop) {
@@ -26613,7 +26615,7 @@ index 4d4589869c..90d75fc743 100644
  		return 1;
  	default:
  		break;
-@@ -1413,11 +2042,9 @@ static enum power_supply_property battery_props[] = {
+@@ -1413,11 +2044,9 @@ static enum power_supply_property battery_props[] = {
  	POWER_SUPPLY_PROP_VOLTAGE_NOW,
  	POWER_SUPPLY_PROP_VOLTAGE_MAX,
  	POWER_SUPPLY_PROP_CURRENT_NOW,
@@ -26626,7 +26628,7 @@ index 4d4589869c..90d75fc743 100644
  	POWER_SUPPLY_PROP_TEMP,
  	POWER_SUPPLY_PROP_TECHNOLOGY,
  	POWER_SUPPLY_PROP_CHARGE_COUNTER,
-@@ -1432,8 +2059,44 @@ static enum power_supply_property battery_props[] = {
+@@ -1432,8 +2061,44 @@ static enum power_supply_property battery_props[] = {
  	POWER_SUPPLY_PROP_POWER_AVG,
  };
  
@@ -26671,7 +26673,7 @@ index 4d4589869c..90d75fc743 100644
  	.type			= POWER_SUPPLY_TYPE_BATTERY,
  	.properties		= battery_props,
  	.num_properties		= ARRAY_SIZE(battery_props),
-@@ -1446,14 +2109,35 @@ static int battery_chg_init_psy(struct battery_chg_dev *bcdev)
+@@ -1446,14 +2111,35 @@ static int battery_chg_init_psy(struct battery_chg_dev *bcdev)
  {
  	struct power_supply_config psy_cfg = {};
  	int rc;
@@ -26708,7 +26710,7 @@ index 4d4589869c..90d75fc743 100644
  		pr_err("Failed to register USB power supply, rc=%d\n", rc);
  		return rc;
  	}
-@@ -1462,21 +2146,10 @@ static int battery_chg_init_psy(struct battery_chg_dev *bcdev)
+@@ -1462,21 +2148,10 @@ static int battery_chg_init_psy(struct battery_chg_dev *bcdev)
  		devm_power_supply_register(bcdev->dev, &wls_psy_desc, &psy_cfg);
  	if (IS_ERR(bcdev->psy_list[PSY_TYPE_WLS].psy)) {
  		rc = PTR_ERR(bcdev->psy_list[PSY_TYPE_WLS].psy);
@@ -26730,7 +26732,7 @@ index 4d4589869c..90d75fc743 100644
  	return 0;
  }
  
-@@ -1517,16 +2190,11 @@ static int wireless_fw_send_firmware(struct battery_chg_dev *bcdev,
+@@ -1517,16 +2192,11 @@ static int wireless_fw_send_firmware(struct battery_chg_dev *bcdev,
  {
  	struct wireless_fw_push_buf_req msg = {};
  	const u8 *ptr;
@@ -26750,7 +26752,7 @@ index 4d4589869c..90d75fc743 100644
  
  	if (!num_chunks)
  		return -EINVAL;
-@@ -1538,9 +2206,9 @@ static int wireless_fw_send_firmware(struct battery_chg_dev *bcdev,
+@@ -1538,9 +2208,9 @@ static int wireless_fw_send_firmware(struct battery_chg_dev *bcdev,
  	msg.hdr.type = MSG_TYPE_REQ_RESP;
  	msg.hdr.opcode = BC_WLS_FW_PUSH_BUF_REQ;
  
@@ -26762,7 +26764,7 @@ index 4d4589869c..90d75fc743 100644
  
  		pr_debug("sending FW chunk %u\n", i + 1);
  		rc = battery_chg_fw_write(bcdev, &msg, sizeof(msg));
-@@ -1550,7 +2218,7 @@ static int wireless_fw_send_firmware(struct battery_chg_dev *bcdev,
+@@ -1550,7 +2220,7 @@ static int wireless_fw_send_firmware(struct battery_chg_dev *bcdev,
  
  	if (partial_chunk_size) {
  		msg.fw_chunk_id = i + 1;
@@ -26771,7 +26773,7 @@ index 4d4589869c..90d75fc743 100644
  		memcpy(msg.buf, ptr, partial_chunk_size);
  
  		pr_debug("sending partial FW chunk %u\n", i + 1);
-@@ -1576,43 +2244,17 @@ static int wireless_fw_check_for_update(struct battery_chg_dev *bcdev,
+@@ -1576,43 +2246,17 @@ static int wireless_fw_check_for_update(struct battery_chg_dev *bcdev,
  	req_msg.fw_size = size;
  	req_msg.fw_crc = bcdev->wls_fw_crc;
  
@@ -26817,7 +26819,7 @@ index 4d4589869c..90d75fc743 100644
  	int rc;
  
  	if (!bcdev->wls_fw_name) {
-@@ -1662,7 +2304,12 @@ static int wireless_fw_update(struct battery_chg_dev *bcdev, bool force)
+@@ -1662,7 +2306,12 @@ static int wireless_fw_update(struct battery_chg_dev *bcdev, bool force)
  		goto release_fw;
  	}
  
@@ -26831,7 +26833,7 @@ index 4d4589869c..90d75fc743 100644
  
  	pr_debug("FW size: %zu version: %#x\n", fw->size, version);
  
-@@ -1764,7 +2411,7 @@ static ssize_t wireless_fw_version_show(const struct class *c,
+@@ -1764,7 +2413,7 @@ static ssize_t wireless_fw_version_show(const struct class *c,
  	req_msg.hdr.type = MSG_TYPE_REQ_RESP;
  	req_msg.hdr.opcode = BC_WLS_FW_GET_VERSION;
  
@@ -26840,7 +26842,7 @@ index 4d4589869c..90d75fc743 100644
  	if (rc < 0) {
  		pr_err("Failed to get FW version rc=%d\n", rc);
  		return rc;
-@@ -1831,48 +2478,6 @@ static ssize_t wireless_type_show(const struct class *c,
+@@ -1831,48 +2480,6 @@ static ssize_t wireless_type_show(const struct class *c,
  }
  static CLASS_ATTR_RO(wireless_type);
  
@@ -26889,7 +26891,7 @@ index 4d4589869c..90d75fc743 100644
  static ssize_t usb_typec_compliant_show(const struct class *c,
  				const struct class_attribute *attr, char *buf)
  {
-@@ -1907,8 +2512,7 @@ static ssize_t usb_real_type_show(const struct class *c,
+@@ -1907,8 +2514,7 @@ static ssize_t usb_real_type_show(const struct class *c,
  }
  static CLASS_ATTR_RO(usb_real_type);
  
@@ -26899,7 +26901,7 @@ index 4d4589869c..90d75fc743 100644
  				const char *buf, size_t count)
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
-@@ -1932,8 +2536,7 @@ static ssize_t restrict_cur_store(const struct class *c,
+@@ -1932,8 +2538,7 @@ static ssize_t restrict_cur_store(const struct class *c,
  	return count;
  }
  
@@ -26909,7 +26911,7 @@ index 4d4589869c..90d75fc743 100644
  				char *buf)
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
-@@ -1943,8 +2546,7 @@ static ssize_t restrict_cur_show(const struct class *c,
+@@ -1943,8 +2548,7 @@ static ssize_t restrict_cur_show(const struct class *c,
  }
  static CLASS_ATTR_RW(restrict_cur);
  
@@ -26919,7 +26921,7 @@ index 4d4589869c..90d75fc743 100644
  				const char *buf, size_t count)
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
-@@ -1964,8 +2566,7 @@ static ssize_t restrict_chg_store(const struct class *c,
+@@ -1964,8 +2568,7 @@ static ssize_t restrict_chg_store(const struct class *c,
  	return count;
  }
  
@@ -26929,7 +26931,7 @@ index 4d4589869c..90d75fc743 100644
  				char *buf)
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
-@@ -1975,8 +2576,7 @@ static ssize_t restrict_chg_show(const struct class *c,
+@@ -1975,8 +2578,7 @@ static ssize_t restrict_chg_show(const struct class *c,
  }
  static CLASS_ATTR_RW(restrict_chg);
  
@@ -26939,7 +26941,7 @@ index 4d4589869c..90d75fc743 100644
  				const char *buf, size_t count)
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
-@@ -1990,14 +2590,13 @@ static ssize_t fake_soc_store(const struct class *c,
+@@ -1990,14 +2592,13 @@ static ssize_t fake_soc_store(const struct class *c,
  	bcdev->fake_soc = val;
  	pr_debug("Set fake soc to %d\n", val);
  
@@ -26956,7 +26958,7 @@ index 4d4589869c..90d75fc743 100644
  				char *buf)
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
-@@ -2028,8 +2627,7 @@ static ssize_t wireless_boost_en_store(const struct class *c,
+@@ -2028,8 +2629,7 @@ static ssize_t wireless_boost_en_store(const struct class *c,
  }
  
  static ssize_t wireless_boost_en_show(const struct class *c,
@@ -26966,7 +26968,7 @@ index 4d4589869c..90d75fc743 100644
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
  						battery_class);
-@@ -2065,8 +2663,7 @@ static ssize_t moisture_detection_en_store(const struct class *c,
+@@ -2065,8 +2665,7 @@ static ssize_t moisture_detection_en_store(const struct class *c,
  }
  
  static ssize_t moisture_detection_en_show(const struct class *c,
@@ -26976,7 +26978,7 @@ index 4d4589869c..90d75fc743 100644
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
  						battery_class);
-@@ -2083,8 +2680,7 @@ static ssize_t moisture_detection_en_show(const struct class *c,
+@@ -2083,8 +2682,7 @@ static ssize_t moisture_detection_en_show(const struct class *c,
  static CLASS_ATTR_RW(moisture_detection_en);
  
  static ssize_t moisture_detection_status_show(const struct class *c,
@@ -26986,7 +26988,7 @@ index 4d4589869c..90d75fc743 100644
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
  						battery_class);
-@@ -2101,8 +2697,7 @@ static ssize_t moisture_detection_status_show(const struct class *c,
+@@ -2101,8 +2699,7 @@ static ssize_t moisture_detection_status_show(const struct class *c,
  static CLASS_ATTR_RO(moisture_detection_status);
  
  static ssize_t resistance_show(const struct class *c,
@@ -26996,7 +26998,7 @@ index 4d4589869c..90d75fc743 100644
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
  						battery_class);
-@@ -2117,8 +2712,8 @@ static ssize_t resistance_show(const struct class *c,
+@@ -2117,8 +2714,8 @@ static ssize_t resistance_show(const struct class *c,
  }
  static CLASS_ATTR_RO(resistance);
  
@@ -27007,7 +27009,7 @@ index 4d4589869c..90d75fc743 100644
  {
  	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
  						battery_class);
-@@ -2133,106 +2728,2948 @@ static ssize_t soh_show(const struct class *c,
+@@ -2133,106 +2730,2948 @@ static ssize_t soh_show(const struct class *c,
  }
  static CLASS_ATTR_RO(soh);
  
@@ -30020,7 +30022,7 @@ index 4d4589869c..90d75fc743 100644
  		pr_err("Failed to create charger debugfs directory, rc=%d\n",
  			rc);
  		return;
-@@ -2245,21 +5682,197 @@ static void battery_chg_add_debugfs(struct battery_chg_dev *bcdev)
+@@ -2245,21 +5684,197 @@ static void battery_chg_add_debugfs(struct battery_chg_dev *bcdev)
  static void battery_chg_add_debugfs(struct battery_chg_dev *bcdev) { }
  #endif
  
@@ -30202,15 +30204,15 @@ index 4d4589869c..90d75fc743 100644
 +					GFP_KERNEL);
 +	if (!bcdev->thermal_levels)
 +		return -ENOMEM;
-+
+ 
+-	bcdev->ship_mode_immediate = of_property_read_bool(node, "qcom,ship-mode-immediate");
 +	/*
 +	 * Element 0 is for normal charging current. Elements from index 1
 +	 * onwards is for thermal mitigation charging currents.
 +	 */
  
--	bcdev->ship_mode_immediate = of_property_read_bool(node, "qcom,ship-mode-immediate");
 +	bcdev->thermal_levels[0] = pst->prop[BATT_CHG_CTRL_LIM_MAX];
- 
++
 +	rc = of_property_read_u32_array(node, "qcom,thermal-mitigation",
 +					&bcdev->thermal_levels[1], len);
 +	if (rc < 0) {
@@ -30221,7 +30223,7 @@ index 4d4589869c..90d75fc743 100644
  	rc = read_property_id(bcdev, pst, BATT_CHG_CTRL_LIM_MAX);
  	if (rc < 0) {
  		pr_err("Failed to read prop BATT_CHG_CTRL_LIM_MAX, rc=%d\n",
-@@ -2335,31 +5948,58 @@ static int battery_chg_parse_dt(struct battery_chg_dev *bcdev)
+@@ -2335,31 +5950,58 @@ static int battery_chg_parse_dt(struct battery_chg_dev *bcdev)
  
  	bcdev->num_thermal_levels = len;
  	bcdev->thermal_fcc_ua = pst->prop[BATT_CHG_CTRL_LIM_MAX];
@@ -30251,10 +30253,7 @@ index 4d4589869c..90d75fc743 100644
 +	msg.hdr.owner = MSG_OWNER_BC;
 +	msg.hdr.type = MSG_TYPE_REQ_RESP;
 +	msg.hdr.opcode = BC_SHUTDOWN_REQ_SET;
- 
--	rc = battery_chg_write(bcdev, &msg_notify, sizeof(msg_notify), BC_WAIT_TIME_MS);
--	if (rc < 0)
--		pr_err("Failed to send shutdown notification rc=%d\n", rc);
++
 +	if (code == SYS_POWER_OFF || code == SYS_RESTART) {
 +		pr_err("start adsp shutdown\n");
 +		rc = battery_chg_write(bcdev, &msg, sizeof(msg));
@@ -30264,7 +30263,10 @@ index 4d4589869c..90d75fc743 100644
 +
 +	return NOTIFY_DONE;
 +}
-+
+ 
+-	rc = battery_chg_write(bcdev, &msg_notify, sizeof(msg_notify), BC_WAIT_TIME_MS);
+-	if (rc < 0)
+-		pr_err("Failed to send shutdown notification rc=%d\n", rc);
 +static int battery_chg_ship_mode(struct notifier_block *nb, unsigned long code,
 +		void *unused)
 +{
@@ -30291,7 +30293,7 @@ index 4d4589869c..90d75fc743 100644
  
  	return NOTIFY_DONE;
  }
-@@ -2374,36 +6014,55 @@ static void panel_event_notifier_callback(enum panel_event_notifier_tag tag,
+@@ -2374,50 +6016,93 @@ static void panel_event_notifier_callback(enum panel_event_notifier_tag tag,
  		return;
  	}
  
@@ -30321,66 +30323,123 @@ index 4d4589869c..90d75fc743 100644
 +	pr_info("%s, blank_state = %d\n", __func__, bcdev->blank_state);
 +	/* k618: stock writes XM_PROP_BLANK_STATUS here; we do it from a work item */
 +	schedule_work(&bcdev->blank_work);
++}
++
++/*
++ * k618: the panel this phone has, when none of a node's "panel" phandles is registered -- the
++ * 13 Pro's second panel (42 02 0b) is in none of the DT's touch / charge-screen / thermal-screen
++ * lists. Only the active panel is registered with drm, so the first one found among the DSI
++ * panel nodes is it.
++ */
++static struct drm_panel *k618_registered_panel(void)
++{
++	struct device_node *np;
++	struct drm_panel *panel;
++
++	for_each_node_with_property(np, "qcom,mdss-dsi-panel-name") {
++		panel = of_drm_find_panel(np);
++		if (!IS_ERR(panel)) {
++			of_node_put(np);
++			return panel;
++		}
++	}
++	return NULL;
  }
  
++/*
++ * k618: msm_drm loads after this driver (batch 248 against 106), so at probe no panel is
++ * registered yet and the stock code gave up for good: the charger never saw a screen event.
++ * Now it tries again every 5 s for 5 minutes. The stock loop also overwrote the charge-screen
++ * node with the first phandle, so a second entry was looked up under the first panel.
++ */
  static int battery_chg_register_panel_notifier(struct battery_chg_dev *bcdev)
  {
 -	struct device_node *np = bcdev->dev->of_node;
-+	//struct device_node *np = bcdev->dev->of_node;
- 	struct device_node *pnode;
- 	struct drm_panel *panel, *active_panel = NULL;
+-	struct device_node *pnode;
+-	struct drm_panel *panel, *active_panel = NULL;
++	struct device_node *pnode, *node;
++	struct drm_panel *panel = ERR_PTR(-ENODEV), *active_panel = NULL;
  	void *cookie = NULL;
 -	int i, count, rc;
-+	int i, count, rc = 0;
++	int i, count = 0, rc = 0;
  
 -	count = of_count_phandle_with_args(np, "qcom,display-panels", NULL);
-+	pnode = of_find_node_by_name(NULL, "charge-screen");
-+	if (!pnode) {
-+		pr_err("%s ERROR: Cannot find node with panel!", __func__);
-+		return 0;
-+	}
-+	count = of_count_phandle_with_args(pnode, "panel", NULL);
- 	if (count <= 0)
+-	if (count <= 0)
++	if (bcdev->notifier_cookie)
  		return 0;
- 
- 	for (i = 0; i < count; i++) {
+-
+-	for (i = 0; i < count; i++) {
 -		pnode = of_parse_phandle(np, "qcom,display-panels", i);
 -		if (!pnode)
 -			return -ENODEV;
-+		pnode = of_parse_phandle(pnode, "panel", i);
-+		if (!pnode) {
-+			pr_err("%s ERROR: Cannot fine panel of node!", __func__);
-+			return 0;
-+		}
- 
- 		panel = of_drm_find_panel(pnode);
- 		of_node_put(pnode);
-@@ -2416,8 +6075,8 @@ static int battery_chg_register_panel_notifier(struct battery_chg_dev *bcdev)
+-
+-		panel = of_drm_find_panel(pnode);
+-		of_node_put(pnode);
+-		if (!IS_ERR(panel)) {
++	pnode = of_find_node_by_name(NULL, "charge-screen");
++	if (pnode)
++		count = of_count_phandle_with_args(pnode, "panel", NULL);
++	for (i = 0; i < count && !active_panel; i++) {
++		node = of_parse_phandle(pnode, "panel", i);
++		if (!node)
++			continue;
++		panel = of_drm_find_panel(node);
++		of_node_put(node);
++		if (!IS_ERR(panel))
+ 			active_panel = panel;
+-			break;
+-		}
+ 	}
+-
++	of_node_put(pnode);
++	if (!active_panel) {
++		active_panel = k618_registered_panel();
++		if (active_panel)
++			dev_info(bcdev->dev, "k618: panel events from the registered panel (not in charge-screen)\n");
++	}
  	if (!active_panel) {
  		rc = PTR_ERR(panel);
- 		if (rc != -EPROBE_DEFER)
--			dev_err(bcdev->dev, "Failed to find active panel, rc=%d\n", rc);
+-		if (rc != -EPROBE_DEFER)
++		if (bcdev->k618_panel_tries++ < 60)
++			schedule_delayed_work(&bcdev->k618_panel_dw, msecs_to_jiffies(5000));
++		else
+ 			dev_err(bcdev->dev, "Failed to find active panel, rc=%d\n", rc);
 -		return rc;
-+			dev_err(bcdev->dev, "Failed to find active panel, rc=%d\n",rc);
 +		return 0;
  	}
  
  	cookie = panel_event_notifier_register(
-@@ -2429,60 +6088,107 @@ static int battery_chg_register_panel_notifier(struct battery_chg_dev *bcdev)
+@@ -2429,60 +6114,116 @@ static int battery_chg_register_panel_notifier(struct battery_chg_dev *bcdev)
  	if (IS_ERR(cookie)) {
  		rc = PTR_ERR(cookie);
  		dev_err(bcdev->dev, "Failed to register panel event notifier, rc=%d\n", rc);
 -		return rc;
++		return 0;
  	}
  
 -	pr_debug("register panel notifier successful\n");
-+	pr_err("register panel notifier successful\n");
++	dev_info(bcdev->dev, "register panel notifier successful (try %d)\n", bcdev->k618_panel_tries);
  	bcdev->notifier_cookie = cookie;
  	return 0;
  }
  
 -static int
 -battery_chg_get_max_charge_cntl_limit(struct thermal_cooling_device *tcd,
+-					unsigned long *state)
++static void k618_bc_panel_fn(struct work_struct *work)
+ {
+-	struct battery_chg_dev *bcdev = tcd->devdata;
++	struct battery_chg_dev *bcdev = container_of(to_delayed_work(work), struct battery_chg_dev,
++						     k618_panel_dw);
+ 
+-	*state = bcdev->num_thermal_levels;
+-
+-	return 0;
++	battery_chg_register_panel_notifier(bcdev);
+ }
+ 
+-static int
+-battery_chg_get_cur_charge_cntl_limit(struct thermal_cooling_device *tcd,
 -					unsigned long *state)
 +#define MAX_UEVENT_LENGTH 50
 +static int add_xiaomi_uevent(const struct device *dev, struct kobj_uevent_env *env)
@@ -30389,7 +30448,7 @@ index 4d4589869c..90d75fc743 100644
 +	struct platform_device *pdev = container_of(dev, struct platform_device, dev);
 +	struct battery_chg_dev *bcdev = platform_get_drvdata(pdev);
  
--	*state = bcdev->num_thermal_levels;
+-	*state = bcdev->curr_thermal_level;
 +	char *prop_buf = NULL;
 +	char uevent_string[MAX_UEVENT_LENGTH+1];
 +	u32 i = 0;
@@ -30401,8 +30460,8 @@ index 4d4589869c..90d75fc743 100644
 +		return 0;
  
 -static int
--battery_chg_get_cur_charge_cntl_limit(struct thermal_cooling_device *tcd,
--					unsigned long *state)
+-battery_chg_set_cur_charge_cntl_limit(struct thermal_cooling_device *tcd,
+-					unsigned long state)
 -{
 -	struct battery_chg_dev *bcdev = tcd->devdata;
 +	/*add our prop start*/
@@ -30411,24 +30470,16 @@ index 4d4589869c..90d75fc743 100644
 +	snprintf(uevent_string, MAX_UEVENT_LENGTH, "POWER_SUPPLY_REVERSE_CHG_STATE=%s", prop_buf);
 +	add_uevent_var(env, uevent_string);
  
--	*state = bcdev->curr_thermal_level;
- 
--	return 0;
--}
+-	return battery_psy_set_charge_current(bcdev, (int)state);
++
 +	reverse_chg_mode_show( &(bcdev->battery_class), NULL, prop_buf);
 +	snprintf(uevent_string, MAX_UEVENT_LENGTH, "POWER_SUPPLY_REVERSE_CHG_MODE=%s", prop_buf);
 +	add_uevent_var(env, uevent_string);
- 
--static int
--battery_chg_set_cur_charge_cntl_limit(struct thermal_cooling_device *tcd,
--					unsigned long state)
--{
--	struct battery_chg_dev *bcdev = tcd->devdata;
++
 +	tx_mac_show( &(bcdev->battery_class), NULL, prop_buf);
 +	snprintf(uevent_string, MAX_UEVENT_LENGTH, "POWER_SUPPLY_TX_MAC=%s", prop_buf);
 +	add_uevent_var(env, uevent_string);
- 
--	return battery_psy_set_charge_current(bcdev, (int)state);
++
 +	rx_cep_show( &(bcdev->battery_class), NULL, prop_buf);
 +	snprintf(uevent_string, MAX_UEVENT_LENGTH, "POWER_SUPPLY_RX_CEP=%s", prop_buf);
 +	add_uevent_var(env, uevent_string);
@@ -30504,7 +30555,7 @@ index 4d4589869c..90d75fc743 100644
  	bcdev = devm_kzalloc(&pdev->dev, sizeof(*bcdev), GFP_KERNEL);
  	if (!bcdev)
  		return -ENOMEM;
-@@ -2499,6 +6205,10 @@ static int battery_chg_probe(struct platform_device *pdev)
+@@ -2499,6 +6240,10 @@ static int battery_chg_probe(struct platform_device *pdev)
  	bcdev->psy_list[PSY_TYPE_WLS].prop_count = WLS_PROP_MAX;
  	bcdev->psy_list[PSY_TYPE_WLS].opcode_get = BC_WLS_STATUS_GET;
  	bcdev->psy_list[PSY_TYPE_WLS].opcode_set = BC_WLS_STATUS_SET;
@@ -30515,7 +30566,7 @@ index 4d4589869c..90d75fc743 100644
  
  	for (i = 0; i < PSY_TYPE_MAX; i++) {
  		bcdev->psy_list[i].prop =
-@@ -2513,14 +6223,26 @@ static int battery_chg_probe(struct platform_device *pdev)
+@@ -2513,14 +6258,27 @@ static int battery_chg_probe(struct platform_device *pdev)
  	if (!bcdev->psy_list[PSY_TYPE_BATTERY].model)
  		return -ENOMEM;
  
@@ -30540,10 +30591,11 @@ index 4d4589869c..90d75fc743 100644
 +	INIT_DELAYED_WORK( &bcdev->charger_debug_info_print_work, xm_charger_debug_info_print_work);
 +	INIT_DELAYED_WORK( &bcdev->batt_update_work, xm_batt_update_work);
 +	INIT_WORK(&bcdev->blank_work, battery_chg_blank_work);	/* k618 */
++	INIT_DELAYED_WORK(&bcdev->k618_panel_dw, k618_bc_panel_fn);	/* k618 */
  	bcdev->dev = dev;
  
  	rc = battery_chg_register_panel_notifier(bcdev);
-@@ -2539,23 +6261,20 @@ static int battery_chg_probe(struct platform_device *pdev)
+@@ -2539,23 +6297,20 @@ static int battery_chg_probe(struct platform_device *pdev)
  		if (rc != -EPROBE_DEFER)
  			dev_err(dev, "Error in registering with pmic_glink %d\n",
  				rc);
@@ -30574,7 +30626,7 @@ index 4d4589869c..90d75fc743 100644
  	rc = battery_chg_parse_dt(bcdev);
  	if (rc < 0) {
  		dev_err(dev, "Failed to parse dt rc=%d\n", rc);
-@@ -2577,67 +6296,73 @@ static int battery_chg_probe(struct platform_device *pdev)
+@@ -2577,67 +6332,74 @@ static int battery_chg_probe(struct platform_device *pdev)
  		goto error;
  	}
  
@@ -30653,13 +30705,14 @@ index 4d4589869c..90d75fc743 100644
  static void battery_chg_remove(struct platform_device *pdev)
  {
  	struct battery_chg_dev *bcdev = platform_get_drvdata(pdev);
--
++	int rc;
+ 
 -	down_write(&bcdev->state_sem);
 -	atomic_set(&bcdev->state, PMIC_GLINK_STATE_DOWN);
 -	bcdev->initialized = false;
 -	up_write(&bcdev->state_sem);
-+	int rc;
- 
+-
++	cancel_delayed_work_sync(&bcdev->k618_panel_dw);	/* k618 */
  	if (bcdev->notifier_cookie)
  		panel_event_notifier_unregister(bcdev->notifier_cookie);
 +	charger_unreg_notifier(&bcdev->charger_nb);	/* k618 */
@@ -30682,7 +30735,7 @@ index 4d4589869c..90d75fc743 100644
  }
  
  static const struct of_device_id battery_chg_match_table[] = {
-@@ -2656,4 +6381,4 @@ static struct platform_driver battery_chg_driver = {
+@@ -2656,4 +6418,4 @@ static struct platform_driver battery_chg_driver = {
  module_platform_driver(battery_chg_driver);
  
  MODULE_DESCRIPTION("QTI Glink battery charger driver");

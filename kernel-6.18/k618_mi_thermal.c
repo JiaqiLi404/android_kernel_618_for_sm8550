@@ -488,6 +488,26 @@ static void k618_panel_event(enum panel_event_notifier_tag tag,
 	}
 }
 
+/*
+ * the registered panel when none of thermal-screen's "panel" list is -- that list names the
+ * 13 Pro's 38 0c 0a panel and a reference panel, not its second panel (42 02 0b), so on phones
+ * with that panel screen_state never registered. Only the active panel is registered with drm.
+ */
+static struct drm_panel *k618_registered_panel(void)
+{
+	struct device_node *np;
+	struct drm_panel *panel;
+
+	for_each_node_with_property(np, "qcom,mdss-dsi-panel-name") {
+		panel = of_drm_find_panel(np);
+		if (!IS_ERR(panel)) {
+			of_node_put(np);
+			return panel;
+		}
+	}
+	return NULL;
+}
+
 /* stock screen_state_check (0x448): find the panel, register, retry every 5 s while it is not up */
 static void k618_panel_check(struct work_struct *work)
 {
@@ -498,7 +518,10 @@ static void k618_panel_check(struct work_struct *work)
 	np = of_find_node_by_name(NULL, "thermal-screen");
 	if (!np) {
 		pr_err("no DT node \"thermal-screen\"\n");
-		goto retry;
+		k618_prim_panel = k618_registered_panel();
+		if (!k618_prim_panel)
+			goto retry;
+		goto found;
 	}
 
 	count = of_count_phandle_with_args(np, "panel", NULL);
@@ -518,8 +541,14 @@ static void k618_panel_check(struct work_struct *work)
 	}
 	of_node_put(np);
 
+	if (!k618_prim_panel) {
+		k618_prim_panel = k618_registered_panel();
+		if (k618_prim_panel)
+			pr_info("screen_state: panel not in thermal-screen's list, the registered one taken\n");
+	}
 	if (!k618_prim_panel)
 		goto retry;
+found:
 	if (k618_panel_cookie)
 		return;
 

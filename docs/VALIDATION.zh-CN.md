@@ -41,7 +41,7 @@ bash scripts/run-limited.sh verify
 |:--|:--|
 | 独立上游输入重建 | **通过**：15 个仓库、2 个 vendor 引用、6 个分区、54 个模块哈希（[记录](../provenance/input-validation.json)） |
 | 源码编译 | **通过**：GKI、249 / 249 SoC 模块、30 / 30 Techpack 组，以及 RPC / EVA、触摸 / THP、CS35L41、ToF 模块 |
-| 最终模块与 ABI | **404 个模块、21,107 项内核版本化导入**；无 CRC 不匹配或 depmod 未解析错误 |
+| 最终模块与 ABI | **404 个模块、21,116 项内核版本化导入**；无 CRC 不匹配或 depmod 未解析错误 |
 | 内嵌 initramfs 内核 | 18,008 个 vmlinux 导出 CRC 与基础 GKI 一致；内置层与 boot ramdisk 相同（416 项，只有模块层），INITRAMFS_FORCE 关闭 |
 | boot / AnyKernel3 一致性 | 内核、压缩 ramdisk、17 项启动参数及顺序一致；ZIP 和必需清单检查通过 |
 | 安装器模拟 † | 上一版源码：Horizon / A 槽、recovery / B 槽均通过，另一槽不变。本次未重跑（见上）；安装脚本除启动参数列表外没有改动，打包时会逐项核对该列表与镜像一致 |
@@ -68,8 +68,8 @@ adb shell cat /proc/sys/net/ipv4/tcp_congestion_control
 adb shell cat /sys/module/k618_probe/parameters/in_recovery
 ```
 
-默认预期为 **6.18.32、LZ4 主压缩、ZSTD 重压缩、16 GiB zram**，`in_recovery` 为 `N`；进入 TWRP 等 recovery 时为 `Y`，且 recovery 自己的界面能启动。还需检查触摸 / 手势、显示、指纹退出 AOD、通话 / 移动数据、Wi-Fi、音频、各摄像头、指纹 / 人脸，以及拔线熄屏后的系统挂起。
+默认预期为 **6.18.32、LZ4 主压缩、ZSTD 重压缩、16 GiB zram**，`in_recovery` 为 `N`；进入 TWRP 等 recovery 时为 `Y`，且 recovery 自己的界面能启动。还需检查触摸 / 手势、显示、指纹退出 AOD、通话 / 移动数据、Wi-Fi、音频、各摄像头、指纹 / 人脸，以及拔线熄屏后的系统挂起。42 02 0b 面板还需检查低亮度和息屏时的指纹解锁。
 
 <a id="scope"></a>
 
-源码编译、静态检查、QEMU 内核检查与合成分区上的安装器模拟已通过；真实硬件模式、ROM 兼容、温控、待机及功耗仍需真机验证；13 / 13 Ultra 的适配尚未在这两台手机上运行。模拟使用的 128 MiB 测试镜像不代表手机实际分区容量。
+源码编译、静态检查、QEMU 内核检查与合成分区上的安装器模拟已通过；真实硬件模式、ROM 兼容、温控、待机及功耗仍需真机验证；13 / 13 Ultra 的适配和 42 02 0b 面板的支持尚未在相应机器上运行。模拟使用的 128 MiB 测试镜像不代表手机实际分区容量。

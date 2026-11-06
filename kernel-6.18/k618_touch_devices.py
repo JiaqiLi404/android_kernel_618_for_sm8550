@@ -71,6 +71,65 @@ EDITS = [
      "\t\tparse_dt(&client->dev, info->board);\n\t}\n"
      "\tif (k618_irq_new && info->board && gpio_is_valid(info->board->irq_gpio))\n"
      "\t\tclient->irq = gpio_to_irq(info->board->irq_gpio);\t/* k618 devices: the new pin's */\n"),
+    # the 13 Ultra's xiaomi_touch.ko (OS3.0.308.0, 0x59dc..0x5c14) has two more THP nodes,
+    # touch_thp_breakline_mode and touch_thp_breakline_result: an int each (pdata+0x1020 /
+    # +0x1024), "%d" both ways, sysfs_notify on store -- what K618_INT_NODE (drafts/k618_touch_thp.py)
+    # does. Values passed between the THP algorithm and the HAL; the IC is not touched. Present
+    # on all three phones (the others' userspace never opens them).
+    ("xiaomi/xiaomi_touch.h",
+     "\tint thp_testmode, thp_testresult, thp_preset_point;\n",
+     "\tint thp_testmode, thp_testresult, thp_preset_point;\n"
+     "\tint thp_breakline_mode, thp_breakline_result;\t/* k618 devices: the 13 Ultra's nodes */\n"),
+    ("xiaomi/xiaomi_touch.c",
+     "K618_INT_NODE(touch_sensor_ctrl, sensor_ctrl)\n",
+     "K618_INT_NODE(touch_sensor_ctrl, sensor_ctrl)\n"
+     "K618_INT_NODE(touch_thp_breakline_mode, thp_breakline_mode)\t/* k618 devices */\n"
+     "K618_INT_NODE(touch_thp_breakline_result, thp_breakline_result)\n"),
+    ("xiaomi/xiaomi_touch.c",
+     "static DEVICE_ATTR(touch_sensor_ctrl, 0664, touch_sensor_ctrl_show, touch_sensor_ctrl_store);\n",
+     "static DEVICE_ATTR(touch_sensor_ctrl, 0664, touch_sensor_ctrl_show, touch_sensor_ctrl_store);\n"
+     "static DEVICE_ATTR(touch_thp_breakline_mode, 0664, touch_thp_breakline_mode_show,\n"
+     "\t\t   touch_thp_breakline_mode_store);\t/* k618 devices */\n"
+     "static DEVICE_ATTR(touch_thp_breakline_result, 0664, touch_thp_breakline_result_show,\n"
+     "\t\t   touch_thp_breakline_result_store);\n"),
+    ("xiaomi/xiaomi_touch.c",
+     "\t&dev_attr_touch_sensor_ctrl.attr,\n",
+     "\t&dev_attr_touch_sensor_ctrl.attr,\n"
+     "\t&dev_attr_touch_thp_breakline_mode.attr,\t/* k618 devices */\n"
+     "\t&dev_attr_touch_thp_breakline_result.attr,\n"),
+    # the panel for panel events. The touch node's "panel" list names the 13 Pro's 38 0c 0a
+    # panel and a reference panel, not its second panel (42 02 0b, which some 13 Pro carry), so on
+    # those phones no listed panel is registered and touch got no screen on / off / AOD events.
+    # Only the active panel is registered with drm: take the first registered one among the DSI
+    # panel nodes when none of the list is.
+    ("fts_spi/fts.c",
+     "static int fts_ts_check_panel(struct device_node *np)\n{\n",
+     "/* k618 devices: the registered panel, when none of the node's list is (see fts_ts_check_panel) */\n"
+     "static struct drm_panel *k618_registered_panel(void)\n"
+     "{\n"
+     "\tstruct device_node *pn;\n"
+     "\tstruct drm_panel *p;\n"
+     "\n"
+     "\tfor_each_node_with_property(pn, \"qcom,mdss-dsi-panel-name\") {\n"
+     "\t\tp = of_drm_find_panel(pn);\n"
+     "\t\tif (!IS_ERR(p)) {\n"
+     "\t\t\tof_node_put(pn);\n"
+     "\t\t\treturn p;\n"
+     "\t\t}\n"
+     "\t}\n"
+     "\treturn NULL;\n"
+     "}\n"
+     "\n"
+     "static int fts_ts_check_panel(struct device_node *np)\n{\n"),
+    ("fts_spi/fts.c",
+     "\t\t} else {\n\t\t\tactive_panel = NULL;\n\t\t}\n\t}\n\n\treturn PTR_ERR(panel);\n}\n",
+     "\t\t} else {\n\t\t\tactive_panel = NULL;\n\t\t}\n\t}\n\n"
+     "\tactive_panel = k618_registered_panel();\t/* k618 devices */\n"
+     "\tif (active_panel) {\n"
+     "\t\tlogError(1, \"%s k618: panel not in the node's list, the registered one taken\\n\", tag);\n"
+     "\t\treturn 0;\n"
+     "\t}\n"
+     "\treturn PTR_ERR(panel);\n}\n"),
 ]
 
 
