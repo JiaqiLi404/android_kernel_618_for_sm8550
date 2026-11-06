@@ -55,7 +55,7 @@ def main():
         check(archive.read('Image') == kernel, 'AK3 kernel differs from boot.img')
         check(archive.read('ramdisk-new.cpio.lz4') == ramdisk, 'AK3 ramdisk differs from boot.img')
         check(archive.read('anykernel.sh') == (project / 'tools/ak3/anykernel-618.sh').read_bytes(), 'AK3 installer differs')
-    with zipfile.ZipFile(dist / 'nuwa-618-v2.zip') as archive:
+    with zipfile.ZipFile(dist / 'nuwa-618-v3.zip') as archive:
         check(archive.testzip() is None and 'module.prop' in archive.namelist(), 'Invalid tuning-module zip')
         expected = {str(p.relative_to(project / 'module/nuwa-618')): p.read_bytes()
                     for p in (project / 'module/nuwa-618').rglob('*') if p.is_file()}
@@ -65,8 +65,22 @@ def main():
             check(archive.read(name) == value, 'Tuning-module source mismatch: ' + name)
     raw = subprocess.run(['lz4', '-dcq'], input=ramdisk, stdout=subprocess.PIPE, check=True).stdout
     files = cpio_files(raw)
-    for name in ('init', 'k618_umh', 'lib/modules/modules.load', 'lib/modules/k618_batch.load'):
+    # The boot ramdisk is the project's module layer only; the device's own ramdisks (vendor_boot,
+    # init_boot or recovery) are unpacked first and supply init, fstab and the rest.
+    for name in ('k618_umh', 'lib/modules/modules.load', 'lib/modules/modules.load.recovery',
+                 'lib/modules/modules.load.charger', 'lib/modules/k618_batch.load'):
         check(name in files, f'Ramdisk is missing {name}')
+    foreign = sorted(n for n in files if n not in ('k618_umh', 'lib') and not n.startswith('lib/'))
+    check(not foreign, 'Ramdisk carries more than the module layer: ' + ', '.join(foreign[:10]))
+    # The kernel carries the same layer (CONFIG_INITRAMFS_SOURCE) and unpacks it after the
+    # bootloader's ramdisks; INITRAMFS_FORCE would drop the device's own ramdisks.
+    embedded = build / 'boot-test/initramfs.cpio'
+    check(embedded.is_file() and embedded.read_bytes() == raw,
+          'Built-in initramfs differs from the boot image ramdisk layer')
+    ir_config = (build / 'out-gki-ir/.config').read_text().splitlines()
+    check(any(line.startswith('CONFIG_INITRAMFS_SOURCE=') and line.endswith('/initramfs.cpio"')
+              for line in ir_config), 'Embedded-initramfs kernel has no module-layer source')
+    check('CONFIG_INITRAMFS_FORCE=y' not in ir_config, 'INITRAMFS_FORCE is enabled')
     modules = {Path(n).name: value for n, value in files.items() if n.startswith('lib/modules/') and n.endswith('.ko')}
     for listing in ('modules.load', 'k618_batch.load'):
         for name in files['lib/modules/' + listing].decode().splitlines():
@@ -74,6 +88,13 @@ def main():
     check('mibbr.ko' in modules and
           'mibbr.ko' in files['lib/modules/k618_batch.load'].decode().splitlines(),
           'Official TCP policy module missing from the load list')
+    check(files['lib/modules/modules.load.recovery'] == files['lib/modules/modules.load'] ==
+          files['lib/modules/modules.load.charger'], 'Recovery/charger first-stage lists differ')
+    # Drivers for hardware of the 13 and 13 Ultra (k618_timg.sh DEVICES=1): batch only.
+    batch_list = files['lib/modules/k618_batch.load'].decode().splitlines()
+    device_modules = ['qcom-i2c-pmic.ko', 'qcom_pm8008-regulator.ko', 'stmvl53l5.ko']
+    missing_devices = [m for m in device_modules if m not in modules or m not in batch_list]
+    check(not missing_devices, 'Device driver modules missing from the batch: ' + ', '.join(missing_devices))
     # Use the original port's ELF decoder, but enforce failure instead of merely reporting.
     decoder_path = project / 'kernel-6.18/k618_kmi_check.py'
     namespace = {'__name__': 'kmi_decoder'}
@@ -135,6 +156,7 @@ def main():
         'zram_candidate_slab': 'k618_pp_slab' in (source/'drivers/block/zram/zram_drv.c').read_text(),
         'dm_bufio_budget': 'k618_bufio_budget' in (source/'drivers/md/dm-bufio.c').read_text(),
         'setting_trial_guard': (project/'module/nuwa-618/trial-guard.sh').is_file(),
+        'initramfs_last': 'k618 initramfs_last' in (source/'init/initramfs.c').read_text(),
     }
     check(all(feature_checks.values()), 'Missing configured source feature: ' + str(feature_checks))
     report = {
@@ -146,6 +168,8 @@ def main():
         'kernel_sha256': hashlib.sha256(kernel).hexdigest(),
         'ramdisk_sha256': hashlib.sha256(ramdisk).hexdigest(), 'cmdline': cmdline,
         'configured_source_features': feature_checks,
+        'ramdisk': {'content': 'module layer only (lib/, k618_umh)', 'entries': len(files),
+                    'embedded_copy_identical': True, 'device_modules': device_modules},
         'tcp': {'built_in_congestion_control': ['cubic', 'bbr'], 'default': 'cubic',
                 'built_in_qdiscs': ['fq', 'fq_codel'], 'vendor_policy_module': 'mibbr.ko'},
         'limits': 'Build, payload and static ABI validation; hardware behavior requires device testing.'

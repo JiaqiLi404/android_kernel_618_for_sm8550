@@ -27,7 +27,7 @@ PO="$PO deny_panic_ms=0 deny_wait_ms=0"
 
 [ "${WALT_COMPAT:-1}" = 1 ] && PO="$PO walt_compat=1"
 # NV_VOLS=modemst1,modemst2,fsc,fsg: the modem's own file system, writable by rmt_storage only
-# (NV_COMM to name another program). Off by default: on the user's word only, after a backup.
+# (NV_COMM to name another program). Off by default; set it only after those partitions are backed up.
 [ -n "${NV_VOLS:-}" ] && PO="$PO nv_vols=$NV_VOLS${NV_COMM:+ nv_comm=$NV_COMM}"
 
 
@@ -211,6 +211,15 @@ fi
 if [ -n "$BA" ] && [ "${EXTEND_RECLAIM:-0}" != 0 ]; then
 	EX="$EX $D/k618_extend_reclaim.c=extend_reclaim"; BO="$BO extend_reclaim"
 	echo "extend_reclaim: into the batch"
+fi
+# DEVICES=1 (default): the drivers of the 13's and 13 Ultra's own hardware that this phone's
+# lists do not name -- the 13 Ultra's camera PMIC, PM8008 (qcom-i2c-pmic, the MFD parent, and
+# qcom_pm8008-regulator, as its vendor_dlkm loads them), and its ToF sensor (stmvl53l5,
+# k618_tof.sh). They bind only where the device tree has the part; on the 13 Pro they load and
+# stay idle.
+if [ -n "$BA" ] && [ "${DEVICES:-1}" != 0 ]; then
+	BO="$BO qcom-i2c-pmic qcom_pm8008-regulator stmvl53l5"
+	echo "devices: the 13 Ultra's PM8008 and ToF drivers into the batch"
 fi
 
 

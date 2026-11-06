@@ -208,15 +208,14 @@
       "name_en": "Stop reference scans early",
       "name_zh": "提前停止反向映射扫描",
       "classification": "public vendor algorithm adaptation",
-      "origin_en": "Huawei CONFIG_STOP_PAGE_REF / stop_page_referencing.c; the linked preserved source carries Huawei copyright. The access endpoint is a public mirror.",
-      "origin_zh": "华为 CONFIG_STOP_PAGE_REF / stop_page_referencing.c；所链接源码保留华为版权声明，访问入口为公开源码镜像。",
+      "origin_en": "Huawei CONFIG_STOP_PAGE_REF, mm/stop_page_referencing.c from the Huawei Kirin 9000 kernel open-source release; the rule is reimplemented here, no file is imported.",
+      "origin_zh": "华为 CONFIG_STOP_PAGE_REF，出自华为麒麟 9000 内核开源发布中的 mm/stop_page_referencing.c；此处重新实现该规则，未导入其文件。",
       "adaptation_en": "Reimplement the settled-decision rule for folios/classic LRU, retain exported folio_referenced ABI, and use randomized full walks rather than Huawei page flags.",
       "adaptation_zh": "按 folio / 经典 LRU 重写“结论已定就停止”的规则，保留导出的 folio_referenced ABI；用随机完整扫描代替华为页标志方案。",
       "sources": [
         {
-          "label": "Huawei source mirror",
-          "url": "https://github.com/WenHao2130-TeaHouse/android_kernel_huawei_kirin9000/blob/11399ea8aa8f58f7b3e5e672bc3e1acece3066fe/mm/stop_page_referencing.c",
-          "role": "source"
+          "label": "Huawei Kirin 9000 kernel open-source release, mm/stop_page_referencing.c",
+          "role": "algorithm reference (vendor open-source release; no link)"
         }
       ],
       "implementation": "../kernel-6.18/k618_ports.py",
@@ -273,16 +272,21 @@
       "id": "wake_holds",
       "name_en": "Wakelock/alarm hold limits",
       "name_zh": "唤醒锁 / 闹钟保持时间",
-      "classification": "public optimization policy adaptation",
-      "origin_en": "donothavename/opt_gki_kernel_android13-5.15 other_opt.sh publicly applies the 500 ms untimed-wakelock rule and alarm min+5 ms rule.",
-      "origin_zh": "donothavename/opt_gki_kernel_android13-5.15 的 other_opt.sh 公开包含无时限唤醒锁 500 ms 和闹钟 min+5 ms 两条规则。",
-      "adaptation_en": "Reimplement as reversible runtime parameters and bound overdue-alarm arithmetic. The upstream sed rules are policy references, not imported source files.",
-      "adaptation_zh": "改成可恢复的运行时参数，并约束过期闹钟的时间运算；引用其策略，没有直接导入该仓库脚本。",
+      "classification": "project policy on upstream mechanisms",
+      "origin_en": "Project policy: untimed wakelocks written through /sys/power/wake_lock expire after 500 ms, and the alarm timer holds its wakeup source until 5 ms after a due alarm instead of a fixed two seconds. Both act on upstream PM wakelock and alarmtimer code.",
+      "origin_zh": "本项目策略：经 /sys/power/wake_lock 写入、未给时限的唤醒锁 500 ms 后到期；闹钟定时器只把唤醒源保持到到期后 5 ms，而不是固定 2 秒。两者作用于上游的 PM 唤醒锁与 alarmtimer 代码。",
+      "adaptation_en": "Implemented as reversible runtime parameters (wakelock.untimed_ms, alarmtimer.short_hold) with bounded overdue-alarm arithmetic.",
+      "adaptation_zh": "实现为可恢复的运行时参数（wakelock.untimed_ms、alarmtimer.short_hold），并约束过期闹钟的时间运算。",
       "sources": [
         {
-          "label": "Pinned other_opt.sh",
-          "url": "https://github.com/donothavename/opt_gki_kernel_android13-5.15/blob/4662b82f6205119e8b26a0f7e83940350e4a2011/scripts/other_opt.sh",
-          "role": "source"
+          "label": "ACK kernel/power/wakelock.c",
+          "url": "https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/power/wakelock.c",
+          "role": "upstream mechanism"
+        },
+        {
+          "label": "ACK kernel/time/alarmtimer.c",
+          "url": "https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/kernel/time/alarmtimer.c",
+          "role": "upstream mechanism"
         }
       ],
       "implementation": "../tools/kernel-patches/wake_holds.py",
@@ -291,18 +295,18 @@
     },
     {
       "id": "wakelock_blocker",
-      "name_en": "Boeffla wakelock interface",
-      "name_zh": "Boeffla 唤醒锁拦截接口",
-      "classification": "public interface reimplementation",
-      "origin_en": "Interface and authorship: andip71 Boeffla wakelock blocker 1.1.0, preserved in the Boeffla OnePlus 3 repository. Selected default names are listed in the current implementation.",
-      "origin_zh": "接口及作者归属：andip71 的 Boeffla wakelock blocker 1.1.0，源码保留于 Boeffla 一加 3 仓库。当前实现中列出选用的默认名称。",
-      "adaptation_en": "Preserve the manager-facing sysfs interface, use RCU-parsed lists and a prefix prefilter; exact selected names are visible in DEFAULT_LIST in the linked implementation.",
-      "adaptation_zh": "保留管理器使用的 sysfs 接口，以 RCU 解析名单和前缀预筛重写热路径；当前名单可在实现链接中的 DEFAULT_LIST 直接核对。",
+      "name_en": "Wakelock blocker",
+      "name_zh": "唤醒锁拦截",
+      "classification": "project implementation",
+      "origin_en": "This project's implementation on the upstream wakeup-source code: named wakeup sources in a built-in or user list are not activated. Interface: /sys/devices/virtual/misc/wakelock_blocker (wakelock_blocker, wakelock_blocker_default, debug, version 1.0.0).",
+      "origin_zh": "本项目在上游唤醒源代码上的实现：内置名单或用户名单中的唤醒源不再被激活。接口：/sys/devices/virtual/misc/wakelock_blocker（wakelock_blocker、wakelock_blocker_default、debug、version 1.0.0）。",
+      "adaptation_en": "Lists are parsed when written and swapped under RCU, with a first-character prefilter; the selected default names are DEFAULT_LIST in the linked implementation.",
+      "adaptation_zh": "名单在写入时解析、以 RCU 替换，并按首字符预筛；选用的默认名称即实现链接中的 DEFAULT_LIST。",
       "sources": [
         {
-          "label": "andip71 Boeffla source",
-          "url": "https://github.com/zanezam/boeffla-kernel-oos-oneplus3/blob/da2c77d4d5f9bc10ccb70551956fce0d9705e92f/drivers/base/power/boeffla_wl_blocker.c",
-          "role": "source"
+          "label": "ACK drivers/base/power/wakeup.c",
+          "url": "https://android.googlesource.com/kernel/common/+/ff4a6c3bb0f471a9dd186293a47b62c83829b97d/drivers/base/power/wakeup.c",
+          "role": "upstream wakeup-source code"
         }
       ],
       "implementation": "../tools/kernel-patches/wakelock_blocker.py",

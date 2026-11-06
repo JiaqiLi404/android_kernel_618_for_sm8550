@@ -13,7 +13,7 @@
       "url": "https://github.com/OnePlusOSS/android_kernel_oneplus_sm8850.git",
       "revision": "fc30e54174d254ff7f33622a9278e4435f6718d2",
       "patch": "patches/soc-sm8550.patch",
-      "target_tree": "c28261f1b054e9f0ef69b280dbb25fa52d734678"
+      "target_tree": "010c2c41e3ebbf4beedc17575fbb34eafe7acd03"
     },
     {
       "name": "KernelSU",
@@ -42,6 +42,15 @@
       "sparse": [
         "/drivers/input/touchscreen/fts_spi/",
         "/drivers/input/touchscreen/xiaomi/"
+      ]
+    },
+    {
+      "name": "MiCode 13 Ultra ToF",
+      "path": "k618/src/ishtar/tree",
+      "url": "https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git",
+      "revision": "16c625d2e63c5c38370f00fdff5e44be217ff6d5",
+      "sparse": [
+        "/drivers/input/stmvl53l5/"
       ]
     },
     {

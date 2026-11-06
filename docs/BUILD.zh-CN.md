@@ -14,9 +14,9 @@ bash scripts/run-limited.sh build
 
 | 输出 | 用途 |
 |:--|:--|
-| `dist/release/boot.img` | 完整内核与配套 ramdisk，可用于 fastboot |
+| `dist/release/boot.img` | 内置模块层的内核，ramdisk 为同一模块层，可用于 fastboot |
 | `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` | 兼容刷写工具 / recovery 的内核安装包 |
-| `dist/release/nuwa-618-v2.zip` | 可选 KernelSU 调优模块，控制内核设置 |
+| `dist/release/nuwa-618-v3.zip` | 可选 KernelSU 调优模块，控制内核设置 |
 | `dist/release/validation.json`、`SHA256SUMS` | 校验结果与产物哈希 |
 | `logs/release/build.log` | 构建日志；失败时从首个错误排查 |
 
@@ -24,7 +24,7 @@ bash scripts/run-limited.sh build
 
 ## 2 · 核对手机并备份
 
-仅面向 **小米 13 Pro / nuwa** 和首页指定的配套 ROM。手机需解锁 bootloader；宿主安装 Android platform-tools，手机开启 USB 调试。AnyKernel3 的设备检查已关闭，安装前自行核对：
+主要目标为 **小米 13 Pro / nuwa** 和首页指定的配套 ROM。13 / fuxi 与 13 Ultra / ishtar 的适配尚未在这两台手机上运行，测试前在它们上面只使用临时引导。手机需解锁 bootloader；宿主安装 Android platform-tools，手机开启 USB 调试。AnyKernel3 的设备检查已关闭，安装前自行核对：
 
 ```bash
 adb shell getprop ro.product.device
@@ -64,7 +64,7 @@ fastboot boot dist/release/boot.img
 | Horizon Kernel Flasher / 兼容 recovery | 安装 `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` |
 | Bootloader fastboot | 确认当前槽位后，执行 `fastboot flash boot dist/release/boot.img`，再 `fastboot reboot` |
 
-内核、ramdisk 与模块必须配套；保留 AnyKernel3 ZIP 中的替换 ramdisk。可选 `nuwa-618-v2.zip` 在 KernelSU 模块界面单独安装。
+内核、ramdisk 与模块必须配套；保留 AnyKernel3 ZIP 中的替换 ramdisk。vendor_boot / init_boot 的 ramdisk，或 recovery（例如 TWRP）的 ramdisk 仍会随这个内核运行；只有模块文件和清单来自模块层。可选 `nuwa-618-v3.zip` 在 KernelSU 模块界面单独安装。
 
 ## 4 · 回退与排错
 

@@ -14,3 +14,4 @@ usb_f_gsi usb_f_qdss xlogchar
  tmecom-intf
  qcom_rimps
 memlat_scmi
+qcom-i2c-pmic qcom_pm8008-regulator

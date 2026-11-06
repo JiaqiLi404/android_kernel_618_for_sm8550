@@ -2273,6 +2273,1481 @@ bool cam_secure_get_vfe_fd_port_config(void)
 ]
 
 
+# Camera 24: the 13 Ultra's OIS (from its own 5.15 camera.ko, ishtar OS3.0.308.0).
+#
+# Placement: after the camera-16 edits, i.e. after the EDITS list that ends with the "pwr_dwn:"
+# tuple ("\tcam_ois_power_down(o_ctrl);\n"). Several anchors below are the last lines of
+# camera-16 edits (each is extended at its end only, so camera 16's own `new` texts stay whole), so
+# these tuples must come after camera 16 in EDITS. Every tuple keeps the file's idempotency rules:
+# either `old` is inside `new`, or `new` contains no copy of `old`.
+#
+# What the 13 Pro sees: nothing new runs. o_ctrl->k618_ultra is false there (root "model" is
+# "... 8550 nuwa"), so the slave-info, INIT, packet, READ, START/STOP/RELEASE hooks return at once
+# or call the code they replace; the OIS registers no request-manager ops; the struct grows.
+#
+# Device choice: the root node's "model". On the phones' live device trees it is the only root
+# property that differs -- compatible ("qcom,kalama-mtp", "qcom,kalama", "qcom,mtp") and
+# qcom,board-id (<0x10008 0>) are the same on both; the 13 Pro's live DT has
+# "Qualcomm Technologies, Inc. 8550 nuwa", ishtar's dtbo overlay "Qualcomm Technologies, Inc.
+# 8550 ishtar" (the 13 Pro's live DT shows the bootloader copies the overlay's model). The slave
+# info's length cannot decide it: stock passes the buffer's remaining length, not the struct's
+# (13 Ultra 0x15f84c: x21 = len_of_buff - cmd_desc->offset), and refuses 64 or fewer bytes; the 13
+# Pro's module refuses 58 or fewer. Other kalama Xiaomi models (fuxi, babylon) keep the 13 Pro's
+# path; their layout is not checked here.
+
+CAM_OIS_ULTRA_DECL = r"""
+/* k618 (camera 24): the 13 Ultra's OIS -- defined at the end of this file */
+#include <linux/of.h>
+#define K618_ULTRA_SLAVE_INFO_LEN	0x41	/* stock 0x162714: cmp x2, #0x40; b.ls -> -EINVAL */
+#define K618_ULTRA_INIT_DONE		0x10000	/* k618_ultra_init(): the chip function ran */
+#define K618_OIS_OPCODE_APERTURE	4	/* stock pkt opcode jump table .rodata 0x89588 */
+#define K618_OIS_OPCODE_REDOWNLOAD	5
+#define K618_OIS_OPCODE_PARKLENS	6
+#define K618_OIS_OPCODE_SKIPFRAME	0x7e
+#define K618_SEM1217S_CHIP_ID		0x4c1	/* stock 0x162d84 */
+static int k618_ultra_slave_info(struct cam_ois_ctrl_t *o_ctrl, const uint8_t *info, size_t len);
+static int k618_ultra_init(struct cam_ois_ctrl_t *o_ctrl);
+static int k618_ultra_fw_download(struct cam_ois_ctrl_t *o_ctrl);
+static int k618_ultra_flush_check(struct cam_ois_ctrl_t *o_ctrl, struct cam_packet *csl_packet);
+static int k618_ultra_pkt(struct cam_ois_ctrl_t *o_ctrl, struct cam_packet *csl_packet);
+static int k618_ultra_read_data(struct cam_ois_ctrl_t *o_ctrl, struct i2c_settings_array *set);
+static void k618_ultra_start(struct cam_ois_ctrl_t *o_ctrl);
+static void k618_ultra_stop(struct cam_ois_ctrl_t *o_ctrl);
+static void k618_ultra_release(struct cam_ois_ctrl_t *o_ctrl);
+"""
+
+CAM_OIS_ULTRA = r"""
+/*
+ * k618 (camera 24): the 13 Ultra's OIS, rebuilt from that phone's own 5.15 camera.ko (ishtar
+ * OS3.0.308.0.WMACNXM, symbols kept; the addresses are offsets in its .text). Every entry point
+ * returns early unless o_ctrl->k618_ultra is set, which k618_ois_ultra_setup() does at probe when
+ * the root node's "model" names ishtar; on the 13 Pro camera 16's paths run as before.
+ *  - slave info: 65 bytes (0x162714 refuses 64 or fewer); 0x38 address type and 0x39 page step as
+ *    on the 13 Pro, 0x3a chip id (u16), 0x3c expected program id (u32; RUMBA-S4H: checksum),
+ *    0x40 OIS type (0x1626fc copies 0x28..0x40 to o_ctrl+0xe72..0xe8a).
+ *  - INIT by type (0x1603e4; table pflash_ois at .rodata 0x895e0 = 1, 2, 4, 3, 5, 6, 7): 1-4 and
+ *    7 BU24721, 5 BU24532, 6 RUMBA-S4H; 0 the generic path, where chip id 0x4c1 is a SEM1217S
+ *    (cam_ois_fw_download 0x162d74).
+ *  - a request-manager device (cam_ois_component_bind 0x157b9c-0x157bdc: get_dev_info,
+ *    link_setup, apply_req; only the I2C variant 0x1583b4-0x1583e0 adds flush_req and the
+ *    frame-skip query): packets 4 (settings by request id, "aperture mode"), 0x7e (skip frames),
+ *    0x7f (NOP). Packet 5 runs the chip function again with new calib/postinit buffers; 6 (park
+ *    lens) is accepted and not acted on.
+ *  - RUMBA-S4H and SEM1217S: stock rewrites the chip's flash when its version differs from the
+ *    packaged image; here only with camera.k618_ois_flash_update=1, otherwise both versions are
+ *    logged and the flash is left as it is.
+ */
+static bool k618_ois_flash_update;
+module_param(k618_ois_flash_update, bool, 0644);
+MODULE_PARM_DESC(k618_ois_flash_update,
+	"k618: 13 Ultra OIS -- rewrite the RUMBA-S4H / SEM1217S flash when its version differs from the packaged image (off: log both versions)");
+
+static uint k618_bu24532_fw_update_op;
+module_param(k618_bu24532_fw_update_op, uint, 0644);
+MODULE_PARM_DESC(k618_bu24532_fw_update_op,
+	"k618: 13 Ultra BU24532 -- stock bu24532_ois_fw_update_op: 0 download if the program id differs after auto boot, 1 download unless the expected id is 0, 2 always");
+
+#define K618_BU24532_STATUS	0x6024	/* SETTING_6024: == 1 within 100 ms */
+#define K618_BU24532_PROG_ID	0x6010	/* SETTING_PROGRAM_ID, dword */
+#define K618_BU24532_DL_SID	0x50	/* 7-bit; stock sets cci_client->sid to it around each burst */
+#define K618_RUMBAS4H_FW_SIZE	0x7000
+#define K618_RUMBAS4H_VER_OFS	0x6ff4
+#define K618_SEM1217S_FW_SIZE	0xc000
+#define K618_SEM1217S_VER_OFS	0xbff4
+
+static uint32_t k618_le32(const uint8_t *p)
+{
+	return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int k618_ultra_cci(struct cam_ois_ctrl_t *o_ctrl, const char *chip)
+{
+	if (o_ctrl->io_master_info.master_type != CCI_MASTER ||
+		!o_ctrl->io_master_info.cci_client) {
+		CAM_ERR(CAM_OIS, "k618: %s OIS %s needs a CCI master (type %d)", chip,
+			o_ctrl->ois_name, o_ctrl->io_master_info.master_type);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+/* len bytes from addr, word address (stock rumbas4h_i2c_read_data 0x15c320, i2c_read_data 0x16448c) */
+static int k618_ois_rd(struct cam_ois_ctrl_t *o_ctrl, uint32_t addr, uint8_t *buf, int32_t len)
+{
+	int rc = camera_io_dev_read_seq(&(o_ctrl->io_master_info), addr, buf,
+		CAMERA_SENSOR_I2C_TYPE_WORD, CAMERA_SENSOR_I2C_TYPE_BYTE, len);
+
+	if (rc < 0)
+		CAM_ERR(CAM_OIS, "k618: OIS %s: read 0x%04x (%d bytes) failed: %d",
+			o_ctrl->ois_name, addr, len, rc);
+	return rc;
+}
+
+/*
+ * len (1..256) bytes from addr on, word address, byte data, then delay_ms: as one burst (the
+ * RUMBA-S4H data buffer and checksum) or sequential (stock i2c_write_data 0x1645c0, SEM1217S)
+ */
+static int k618_ois_wr(struct cam_ois_ctrl_t *o_ctrl, uint32_t addr, const uint8_t *buf,
+	uint32_t len, uint8_t mode, unsigned short delay_ms)
+{
+	struct cam_sensor_i2c_reg_setting setting = {0};
+	struct cam_sensor_i2c_reg_array *regs;
+	uint32_t i;
+	int rc;
+
+	if (!len || len > 256)
+		return -EINVAL;
+	regs = kcalloc(len, sizeof(*regs), GFP_KERNEL);
+	if (!regs)
+		return -ENOMEM;
+	for (i = 0; i < len; i++) {
+		regs[i].reg_addr = (mode == CAM_SENSOR_I2C_WRITE_SEQ) ? addr + i : addr;
+		regs[i].reg_data = buf[i];
+	}
+	setting.reg_setting = regs;
+	setting.size = len;
+	setting.addr_type = CAMERA_SENSOR_I2C_TYPE_WORD;
+	setting.data_type = CAMERA_SENSOR_I2C_TYPE_BYTE;
+	setting.delay = delay_ms;
+	rc = camera_io_dev_write_continuous(&(o_ctrl->io_master_info), &setting, mode);
+	kfree(regs);
+	if (rc < 0)
+		CAM_ERR(CAM_OIS, "k618: OIS %s: write 0x%04x (%u bytes) failed: %d",
+			o_ctrl->ois_name, addr, len, rc);
+	return rc;
+}
+
+/*
+ * stock bu24721_ois_pkt_download, the 13 Ultra's (0x158980): camera 16's k618_rohm_ois_init()
+ * with three differences -- a restart ahead of the first program-id read (F050, wait, F097 +1 ms,
+ * F058 +8 ms, F050, wait: 0x158a20-0x158aa8), the expected program id from the slave info
+ * (0x158af8, o_ctrl+0xe86) where the 13 Pro's module indexes a table by type (0x156a3c), and no
+ * gyro-gain reads. A failed download goes back to the run-time slave before returning, as
+ * camera 16 does (stock returns with the download slave set).
+ */
+static int k618_ultra_bu24721_init(struct cam_ois_ctrl_t *o_ctrl)
+{
+	uint32_t want = o_ctrl->k618_ultra_expect_id;
+	uint32_t id;
+	int rc, write_rc = 0;
+
+	rc = k618_ultra_cci(o_ctrl, "BU24721");
+	if (rc)
+		return rc;
+
+	k618_rohm_write(o_ctrl, K618_ROHM_STANDBY, 0, CAMERA_SENSOR_I2C_TYPE_BYTE, 1);
+	k618_rohm_wait_ready(o_ctrl);
+	k618_rohm_write(o_ctrl, K618_ROHM_RESTART_1, 0, CAMERA_SENSOR_I2C_TYPE_BYTE, 1);
+	k618_rohm_write(o_ctrl, K618_ROHM_RESTART_2, 0, CAMERA_SENSOR_I2C_TYPE_BYTE, 8);
+	k618_rohm_write(o_ctrl, K618_ROHM_STANDBY, 0, CAMERA_SENSOR_I2C_TYPE_BYTE, 1);
+	k618_rohm_wait_ready(o_ctrl);
+	id = k618_rohm_read(o_ctrl, K618_ROHM_PROG_ID, CAMERA_SENSOR_I2C_TYPE_DWORD, true);
+	k618_rohm_wait_ready(o_ctrl);
+	CAM_INFO(CAM_OIS, "k618: BU24721 OIS %s type %u: program id 0x%08x, slave info wants 0x%08x",
+		o_ctrl->ois_name, o_ctrl->k618_ultra_type, id, want);
+
+	if (id != want) {
+		k618_rohm_set_slave(o_ctrl, K618_ROHM_DL_SLAVE);
+		if (o_ctrl->i2c_init_data.is_settings_valid == 1) {
+			rc = k618_rohm_apply_retry(o_ctrl, &o_ctrl->i2c_init_data);
+			if (rc)	/* stock logs this and downloads all the same (0x158d08) */
+				CAM_ERR(CAM_OIS, "k618: BU24721 OIS %s: download-mode settings: %d",
+					o_ctrl->ois_name, rc);
+		}
+		rc = k618_rohm_load_fw(o_ctrl, "prog", o_ctrl->opcode.prog, &write_rc);
+		if (!rc && write_rc >= 0)
+			rc = k618_rohm_load_fw(o_ctrl, "coeff", o_ctrl->opcode.coeff, &write_rc);
+		if (!rc && write_rc >= 0)
+			rc = k618_rohm_load_fw(o_ctrl, "mem", o_ctrl->opcode.memory, &write_rc);
+		k618_rohm_set_slave(o_ctrl, K618_ROHM_RUN_SLAVE);
+		if (rc)
+			return rc;
+
+		k618_rohm_write(o_ctrl, K618_ROHM_RESTART_1, 0, CAMERA_SENSOR_I2C_TYPE_BYTE, 1);
+		k618_rohm_write(o_ctrl, K618_ROHM_RESTART_2, 0, CAMERA_SENSOR_I2C_TYPE_BYTE, 8);
+		k618_rohm_wait_ready(o_ctrl);
+		k618_rohm_write(o_ctrl, K618_ROHM_STANDBY, 0, CAMERA_SENSOR_I2C_TYPE_BYTE, 1);
+		k618_rohm_wait_ready(o_ctrl);
+		id = k618_rohm_read(o_ctrl, K618_ROHM_PROG_ID, CAMERA_SENSOR_I2C_TYPE_DWORD, true);
+		k618_rohm_wait_ready(o_ctrl);
+		if (id == want && write_rc >= 0)
+			CAM_INFO(CAM_OIS, "k618: BU24721 OIS %s: firmware loaded, program id 0x%08x",
+				o_ctrl->ois_name, id);
+		else
+			CAM_ERR(CAM_OIS,
+				"k618: BU24721 OIS %s: program id 0x%08x after the download, wants 0x%08x (write %d)",
+				o_ctrl->ois_name, id, want, write_rc);
+	}
+
+	if (o_ctrl->is_ois_calib)
+		k618_rohm_apply_calib(o_ctrl, &o_ctrl->i2c_calib_data);
+	if (o_ctrl->i2c_fwinit_data.is_settings_valid != 1)
+		return 0;
+	rc = k618_rohm_apply_retry(o_ctrl, &o_ctrl->i2c_fwinit_data);
+	if (rc)
+		CAM_ERR(CAM_OIS, "k618: BU24721 OIS %s: fwinit settings: %d", o_ctrl->ois_name, rc);
+	return rc;
+}
+
+static void k618_bu24532_wait(struct cam_ois_ctrl_t *o_ctrl)
+{
+	int rc = camera_io_dev_poll(&(o_ctrl->io_master_info), K618_BU24532_STATUS, 0x01, 0,
+		CAMERA_SENSOR_I2C_TYPE_WORD, CAMERA_SENSOR_I2C_TYPE_BYTE, 100);
+
+	if (rc)
+		CAM_WARN(CAM_OIS, "k618: BU24532 OIS %s: status 0x%04x wait %d",
+			o_ctrl->ois_name, K618_BU24532_STATUS, rc);
+}
+
+/* stock apply_fw_setting (0x1622bc), the "auto boot" */
+static void k618_bu24532_boot(struct cam_ois_ctrl_t *o_ctrl)
+{
+	CAM_DBG(CAM_OIS, "k618: [BU24532] %s: apply kernel firmware setting", o_ctrl->ois_name);
+	k618_rohm_write(o_ctrl, 0x7010, 0x00, CAMERA_SENSOR_I2C_TYPE_BYTE, 0);
+	k618_bu24532_wait(o_ctrl);
+	k618_rohm_write(o_ctrl, 0x6019, 0x87, CAMERA_SENSOR_I2C_TYPE_BYTE, 0);
+	k618_rohm_write(o_ctrl, 0x6018, 0x10, CAMERA_SENSOR_I2C_TYPE_BYTE, 0);
+	k618_bu24532_wait(o_ctrl);
+	k618_rohm_write(o_ctrl, 0x6080, 0xc800b4e1, CAMERA_SENSOR_I2C_TYPE_DWORD, 0);
+	k618_rohm_write(o_ctrl, 0x6084, 0x00000000, CAMERA_SENSOR_I2C_TYPE_DWORD, 0);
+	k618_bu24532_wait(o_ctrl);
+	k618_rohm_write(o_ctrl, 0x6080, 0xc800b0e1, CAMERA_SENSOR_I2C_TYPE_DWORD, 0);
+	k618_rohm_write(o_ctrl, 0x6084, 0x00000001, CAMERA_SENSOR_I2C_TYPE_DWORD, 0);
+	k618_bu24532_wait(o_ctrl);
+	k618_rohm_write(o_ctrl, 0xF011, 0x00, CAMERA_SENSOR_I2C_TYPE_BYTE, 0);
+	msleep(40);
+}
+
+/* stock 0x15a008-0x15a114, ahead of a download */
+static void k618_bu24532_dl_setup(struct cam_ois_ctrl_t *o_ctrl)
+{
+	k618_rohm_write(o_ctrl, 0x7010, 0x00, CAMERA_SENSOR_I2C_TYPE_BYTE, 0);
+	k618_bu24532_wait(o_ctrl);
+	k618_rohm_write(o_ctrl, 0x6019, 0x87, CAMERA_SENSOR_I2C_TYPE_BYTE, 0);
+	k618_rohm_write(o_ctrl, 0x6018, 0x10, CAMERA_SENSOR_I2C_TYPE_BYTE, 0);
+	k618_bu24532_wait(o_ctrl);
+	k618_rohm_write(o_ctrl, 0x6080, 0x10868ce1, CAMERA_SENSOR_I2C_TYPE_DWORD, 0);
+	k618_rohm_write(o_ctrl, 0x6084, 0x08068180, CAMERA_SENSOR_I2C_TYPE_DWORD, 0);
+	k618_bu24532_wait(o_ctrl);
+	k618_rohm_write(o_ctrl, 0x6080, 0x108690e1, CAMERA_SENSOR_I2C_TYPE_DWORD, 0);
+	k618_rohm_write(o_ctrl, 0x6084, 0x08068100, CAMERA_SENSOR_I2C_TYPE_DWORD, 0);
+	k618_bu24532_wait(o_ctrl);
+	k618_rohm_write(o_ctrl, 0xF013, 0x00, CAMERA_SENSOR_I2C_TYPE_BYTE, 0);
+	usleep_range(2000, 2010);
+}
+
+/*
+ * <ois_name>.<suffix> (stock 0x15a4f4-0x15a708 for .prog; .coeff, .mem and .pher alike): size / 4
+ * big-endian dwords, 16 per burst to the download slave at base + 64 * page, the page counted up
+ * per burst when the slave info's page-step byte is set, 10 ms after each burst
+ */
+static int k618_bu24532_load(struct cam_ois_ctrl_t *o_ctrl, const char *suffix, uint32_t base)
+{
+	struct cam_sensor_cci_client *cci = o_ctrl->io_master_info.cci_client;
+	struct cam_sensor_i2c_reg_array regs[16];
+	struct cam_sensor_i2c_reg_setting setting = {0};
+	const struct firmware *fw = NULL;
+	char name[MAX_OIS_NAME_SIZE + 8];
+	uint32_t count, done, page = 0, n = 0, i;
+	uint16_t sid;
+	int rc;
+
+	snprintf(name, sizeof(name), "%s.%s", o_ctrl->ois_name, suffix);
+	rc = request_firmware(&fw, name, &(o_ctrl->pdev->dev));
+	if (rc) {
+		CAM_ERR(CAM_OIS, "k618: [BU24532]Failed to locate %s: %d", name, rc);
+		return rc;
+	}
+	count = (fw->size >> 2) & 0xffff;	/* stock: ubfx w24, w8, #2, #16 */
+	setting.reg_setting = regs;
+	setting.addr_type = o_ctrl->k618_fw_addr_type;
+	if (setting.addr_type <= CAMERA_SENSOR_I2C_TYPE_INVALID ||
+		setting.addr_type >= CAMERA_SENSOR_I2C_TYPE_MAX) {
+		CAM_WARN(CAM_OIS, "k618: [BU24532] firmware address type %u, using word",
+			o_ctrl->k618_fw_addr_type);
+		setting.addr_type = CAMERA_SENSOR_I2C_TYPE_WORD;
+	}
+	setting.data_type = CAMERA_SENSOR_I2C_TYPE_DWORD;
+	setting.delay = 10;
+	sid = cci->sid;
+	for (done = 0; done < count; done += n) {
+		n = min_t(uint32_t, ARRAY_SIZE(regs), count - done);
+		for (i = 0; i < n; i++) {
+			const uint8_t *p = fw->data + 4 * (done + i);
+
+			regs[i].reg_addr = base + (page << 6);
+			regs[i].reg_data = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+				((uint32_t)p[2] << 8) | p[3];
+			regs[i].delay = 0;
+			regs[i].data_mask = 0;
+		}
+		setting.size = n;
+		if (o_ctrl->k618_fw_page_inc)
+			page++;
+		cci->sid = K618_BU24532_DL_SID;
+		rc = camera_io_dev_write_continuous(&(o_ctrl->io_master_info), &setting,
+			CAM_SENSOR_I2C_WRITE_BURST);
+		cci->sid = sid;
+		if (rc < 0) {
+			CAM_ERR(CAM_OIS, "k618: [BU24532]OIS FW(%s) size(%u) download failed rc: %d",
+				suffix, count, rc);
+			break;
+		}
+	}
+	if (rc >= 0)
+		CAM_INFO(CAM_OIS, "k618: [BU24532] %s: %s, %u dwords from 0x%x, page step %u",
+			o_ctrl->ois_name, name, count, base, o_ctrl->k618_fw_page_inc);
+	release_firmware(fw);
+	return rc < 0 ? rc : 0;
+}
+
+/*
+ * stock bu24532_ois_pkt_download (0x159d74). A fwinit buffer is applied instead of all the rest
+ * (0x159dac). Expected id 0xff: no boot, no download (0x159e8c). With update op 0 (stock's
+ * default): auto boot (skipped in packet 5), read the program id; in packet 5 a mismatch gets up
+ * to three more boots, then -EINVAL (0x15a234-0x15a4ec). A download (decided at 0x159f88: op 2,
+ * or op 0/1 with a mismatch) sends .prog .coeff .mem .pher, boots and reads the id again; with
+ * op 0 a mismatch then fails (0x15bce0). Then postinit and calib. Stock's fallback of a download
+ * read from the module's EEPROM (bu24532_ois_enable_read_eeprom, default 0) is not ported.
+ */
+static int k618_bu24532_init(struct cam_ois_ctrl_t *o_ctrl)
+{
+	uint32_t want = o_ctrl->k618_ultra_expect_id, id = 0;
+	uint32_t op = k618_bu24532_fw_update_op;
+	int rc, retry;
+
+	rc = k618_ultra_cci(o_ctrl, "BU24532");
+	if (rc)
+		return rc;
+
+	if (o_ctrl->i2c_fwinit_data.is_settings_valid == 1) {
+		rc = k618_rohm_apply_retry(o_ctrl, &o_ctrl->i2c_fwinit_data);
+		if (rc)
+			CAM_ERR(CAM_OIS, "k618: [BU24532] %s: Cannot apply fwinit data %d",
+				o_ctrl->ois_name, rc);
+		return rc;
+	}
+
+	if (want != 0xff) {
+		if (op == 0) {
+			if (!o_ctrl->k618_ultra_redl)
+				k618_bu24532_boot(o_ctrl);
+			k618_bu24532_wait(o_ctrl);
+			k618_bu24532_wait(o_ctrl);
+			id = k618_rohm_read(o_ctrl, K618_BU24532_PROG_ID,
+				CAMERA_SENSOR_I2C_TYPE_DWORD, true);
+			CAM_INFO(CAM_OIS, "k618: [BU24532] %s: read program ID:0x%x, current ID:0x%x",
+				o_ctrl->ois_name, id, want);
+			for (retry = 0; o_ctrl->k618_ultra_redl && id != want && retry < 3; retry++) {
+				CAM_INFO(CAM_OIS,
+					"k618: [BU24532] %s: retry[%d:max%d] auto boot when open camera",
+					o_ctrl->ois_name, retry, 3);
+				k618_bu24532_boot(o_ctrl);
+				k618_bu24532_wait(o_ctrl);
+				k618_bu24532_wait(o_ctrl);
+				id = k618_rohm_read(o_ctrl, K618_BU24532_PROG_ID,
+					CAMERA_SENSOR_I2C_TYPE_DWORD, true);
+				CAM_INFO(CAM_OIS, "k618: [BU24532] %s: read program ID:0x%x, current ID:0x%x",
+					o_ctrl->ois_name, id, want);
+			}
+			if (o_ctrl->k618_ultra_redl && id != want) {
+				CAM_ERR(CAM_OIS,
+					"k618: [BU24532] %s: read program ID:0x%x, current ID:0x%x, AUTO BOOT failed",
+					o_ctrl->ois_name, id, want);
+				return -EINVAL;
+			}
+		}
+		if (op == 2 || ((op == 0 || op == 1) && id != want)) {
+			k618_bu24532_dl_setup(o_ctrl);
+			rc = k618_bu24532_load(o_ctrl, "prog", o_ctrl->opcode.prog);
+			if (!rc)
+				rc = k618_bu24532_load(o_ctrl, "coeff", o_ctrl->opcode.coeff);
+			if (!rc)
+				rc = k618_bu24532_load(o_ctrl, "mem", o_ctrl->opcode.memory);
+			if (!rc)
+				rc = k618_bu24532_load(o_ctrl, "pher", o_ctrl->opcode.pheripheral);
+			if (!rc) {
+				k618_bu24532_boot(o_ctrl);
+				k618_bu24532_wait(o_ctrl);
+				k618_bu24532_wait(o_ctrl);
+				id = k618_rohm_read(o_ctrl, K618_BU24532_PROG_ID,
+					CAMERA_SENSOR_I2C_TYPE_DWORD, true);
+				CAM_INFO(CAM_OIS,
+					"k618: [BU24532] %s: after DL, read program ID:0x%x, current ID:0x%x",
+					o_ctrl->ois_name, id, want);
+				if (op == 0 && id != want)
+					rc = -EINVAL;
+			}
+			if (rc) {
+				CAM_ERR(CAM_OIS, "k618: [BU24532] %s: fw update failed: %d",
+					o_ctrl->ois_name, rc);
+				return rc;
+			}
+			CAM_INFO(CAM_OIS, "k618: [BU24532] %s: FW update success", o_ctrl->ois_name);
+		}
+	}
+
+	if (o_ctrl->k618_postinit_data.is_settings_valid == 1) {
+		rc = k618_rohm_apply_retry(o_ctrl, &o_ctrl->k618_postinit_data);
+		if (rc) {
+			CAM_ERR(CAM_OIS, "k618: [BU24532] %s: Cannot apply postinit data %d",
+				o_ctrl->ois_name, rc);
+			return rc;
+		}
+	}
+	if (o_ctrl->is_ois_calib) {
+		rc = k618_rohm_apply_retry(o_ctrl, &o_ctrl->i2c_calib_data);
+		if (rc) {
+			CAM_ERR(CAM_OIS, "k618: [BU24532] %s: Cannot apply calib data %d",
+				o_ctrl->ois_name, rc);
+			return rc;
+		}
+	}
+	return 0;
+}
+
+/*
+ * stock RUMBA-S4H flash rewrite (0x15cb68-0x15d1f0), at FAST mode: 0x0001 must read 1; 0x000C =
+ * 0x75 (+65 ms); the image as 112 bursts of 256 bytes to 0x0100 (+13 ms each); 0x0006 must read
+ * 0; 0x0008..0x000B = checksum low, checksum high, 0x00, 0x80 (+210 ms), the checksum being the
+ * slave info's 0x3c (0x15cd98); 0x0006 must read 0; 0x0036 = 0x41 (+190 ms), 0x000D = 0x01
+ * (+20 ms); 0x0001 must reach 9 within ten reads 1 ms apart; 0x000E = 0x06 (+10 ms)
+ */
+static int k618_rumbas4h_flash(struct cam_ois_ctrl_t *o_ctrl, const uint8_t *img)
+{
+	uint16_t cksum = o_ctrl->k618_ultra_expect_id & 0xffff;
+	uint8_t b[4] = {0};
+	uint32_t blk;
+	int rc, i;
+
+	rc = k618_ois_rd(o_ctrl, 0x0001, b, 1);
+	if (rc < 0)
+		return rc;
+	if (b[0] != 1) {
+		CAM_ERR(CAM_OIS, "k618: [RUMBAS4H] %s: not in idle status (0x%02x)",
+			o_ctrl->ois_name, b[0]);
+		return -EINVAL;
+	}
+	CAM_INFO(CAM_OIS, "k618: [RUMBAS4H] %s: in idle status, begin FW update", o_ctrl->ois_name);
+	k618_rohm_write(o_ctrl, 0x000C, 0x75, CAMERA_SENSOR_I2C_TYPE_BYTE, 65);
+	for (blk = 0; blk < K618_RUMBAS4H_FW_SIZE / 256; blk++) {
+		rc = k618_ois_wr(o_ctrl, 0x0100, img + 256 * blk, 256,
+			CAM_SENSOR_I2C_WRITE_BURST, 13);
+		if (rc < 0)
+			return rc;
+	}
+	rc = k618_ois_rd(o_ctrl, 0x0006, b, 2);
+	if (rc < 0)
+		return rc;
+	if (b[0] | b[1]) {
+		CAM_ERR(CAM_OIS, "k618: [RUMBAS4H] %s: FW update fail, 0x0006 = 0x%04x",
+			o_ctrl->ois_name, b[0] | (b[1] << 8));
+		return -EINVAL;
+	}
+	b[0] = cksum & 0xff;
+	b[1] = cksum >> 8;
+	b[2] = 0x00;
+	b[3] = 0x80;
+	rc = k618_ois_wr(o_ctrl, 0x0008, b, 4, CAM_SENSOR_I2C_WRITE_BURST, 210);
+	if (rc < 0)
+		return rc;
+	rc = k618_ois_rd(o_ctrl, 0x0006, b, 2);
+	if (rc < 0)
+		return rc;
+	CAM_INFO(CAM_OIS, "k618: [RUMBAS4H] %s: CHKSUM status = 0x%x", o_ctrl->ois_name,
+		b[0] | (b[1] << 8));
+	if (b[0] | b[1]) {
+		CAM_ERR(CAM_OIS, "k618: [RUMBAS4H] %s: FW update fail", o_ctrl->ois_name);
+		return -EINVAL;
+	}
+	k618_rohm_write(o_ctrl, 0x0036, 0x41, CAMERA_SENSOR_I2C_TYPE_BYTE, 190);
+	k618_rohm_write(o_ctrl, 0x000D, 0x01, CAMERA_SENSOR_I2C_TYPE_BYTE, 20);
+	for (i = 0; i < 10; i++) {
+		b[0] = 0;
+		k618_ois_rd(o_ctrl, 0x0001, b, 1);
+		msleep(1);
+		if (b[0] == 9)
+			break;
+	}
+	if (b[0] != 9) {
+		CAM_ERR(CAM_OIS, "k618: [RUMBAS4H] %s: software reset fail, addr 0x1 rxdata 0x%x",
+			o_ctrl->ois_name, b[0]);
+		return -EINVAL;
+	}
+	CAM_INFO(CAM_OIS, "k618: [RUMBAS4H] %s: software reset success", o_ctrl->ois_name);
+	k618_rohm_write(o_ctrl, 0x000E, 0x06, CAMERA_SENSOR_I2C_TYPE_BYTE, 10);
+	CAM_INFO(CAM_OIS, "k618: [RUMBAS4H] %s: FW update success", o_ctrl->ois_name);
+	return 0;
+}
+
+/*
+ * stock rumbas4h_ois_pkt_download (0x15c840): the packaged version is the u32 at 0x6ff4 of
+ * <ois_name>.prog, the chip's 0x00FC (4 bytes; three tries 1 ms apart, then -EINVAL); a
+ * difference rewrites the flash (here only with k618_ois_flash_update); then calib (a failure is
+ * logged and the init settings still go out, 0x15ce58) and the init settings.
+ */
+static int k618_rumbas4h_init(struct cam_ois_ctrl_t *o_ctrl)
+{
+	struct cam_sensor_cci_client *cci;
+	const struct firmware *fw = NULL;
+	char name[MAX_OIS_NAME_SIZE + 8];
+	enum i2c_freq_mode freq;
+	uint8_t v[4] = {0};
+	uint32_t cur, pkg = 0;
+	bool have_pkg = false;
+	int rc, i;
+
+	rc = k618_ultra_cci(o_ctrl, "RUMBAS4H");
+	if (rc)
+		return rc;
+	cci = o_ctrl->io_master_info.cci_client;
+	freq = cci->i2c_freq_mode;
+
+	snprintf(name, sizeof(name), "%s.prog", o_ctrl->ois_name);
+	if (request_firmware(&fw, name, &(o_ctrl->pdev->dev))) {
+		CAM_ERR(CAM_OIS, "k618: [RUMBAS4H] Failed to load %s", name);
+		fw = NULL;
+	} else if (fw->size < K618_RUMBAS4H_FW_SIZE) {
+		CAM_ERR(CAM_OIS, "k618: [RUMBAS4H] %s is %zu bytes, the image has %d",
+			name, fw->size, K618_RUMBAS4H_FW_SIZE);
+	} else {
+		pkg = k618_le32(fw->data + K618_RUMBAS4H_VER_OFS);
+		have_pkg = true;
+	}
+
+	for (i = 0; i < 3; i++) {
+		rc = k618_ois_rd(o_ctrl, 0x00FC, v, 4);
+		if (rc >= 0)
+			break;
+		msleep(1);
+	}
+	if (rc < 0) {
+		CAM_ERR(CAM_OIS, "k618: [RUMBAS4H] %s: version read failed %d times",
+			o_ctrl->ois_name, i);
+		rc = -EINVAL;
+		goto out;
+	}
+	cur = k618_le32(v);
+	CAM_INFO(CAM_OIS, "k618: [RUMBAS4H] %s: current firmware version = %u, packaged = %u%s",
+		o_ctrl->ois_name, cur, pkg, have_pkg ? "" : " (no image)");
+	if (have_pkg && cur != pkg) {
+		if (!k618_ois_flash_update) {
+			CAM_INFO(CAM_OIS,
+				"k618: [RUMBAS4H] %s: versions differ, flash left as it is (camera.k618_ois_flash_update=0)",
+				o_ctrl->ois_name);
+		} else {
+			cci->i2c_freq_mode = I2C_FAST_MODE;
+			rc = k618_rumbas4h_flash(o_ctrl, fw->data);
+			cci->i2c_freq_mode = freq;
+			if (rc)
+				goto out;
+		}
+	}
+
+	rc = 0;
+	if (o_ctrl->is_ois_calib) {
+		rc = k618_rohm_apply_retry(o_ctrl, &o_ctrl->i2c_calib_data);
+		if (rc)
+			CAM_ERR(CAM_OIS, "k618: [RUMBAS4H] %s: Cannot apply calib data: %d",
+				o_ctrl->ois_name, rc);
+	}
+	if (o_ctrl->i2c_init_data.is_settings_valid == 1) {
+		rc = k618_rohm_apply_retry(o_ctrl, &o_ctrl->i2c_init_data);
+		if (rc)
+			CAM_ERR(CAM_OIS, "k618: [RUMBAS4H] %s: Cannot apply Init settings: rc = %d",
+				o_ctrl->ois_name, rc);
+	}
+out:
+	release_firmware(fw);
+	return rc;
+}
+
+/*
+ * stock cam_sem1217s_ois_fw_download, inlined in cam_ois_fw_download (0x163274-0x163d58): with a
+ * firmware already there, OIS and AF stopped unless idle (REG_OIS_STS 0x0001 / REG_OIS_CTRL
+ * 0x0000, REG_AF_STS 0x0201 / REG_AF_CTRL 0x0200); REG_FWUP_CTRL 0x1000 = 7, 60 ms, 0x0001 must
+ * read 2; 192 blocks of 256 bytes to REG_DATA_BUF 0x1100, 20 ms each; the 16-bit sum of the
+ * image's little-endian halfwords to REG_FWUP_CHKSUM 0x1002, 200 ms; REG_FWUP_ERR 0x1001 must
+ * read 0; REG_FWUP_CTRL = 0x80, 200 ms; REG_APP_VER 0x1008 must then read the packaged version
+ */
+static int k618_sem1217s_flash(struct cam_ois_ctrl_t *o_ctrl, const uint8_t *img, uint32_t cur,
+	uint32_t pkg)
+{
+	uint8_t b[4] = {0};
+	uint32_t sum = 0, ver, i, j;
+	int rc;
+
+	if (cur) {
+		rc = k618_ois_rd(o_ctrl, 0x0001, b, 1);
+		if (rc < 0)
+			return rc;
+		if (b[0] != 1) {
+			b[0] = 0;
+			rc = k618_ois_wr(o_ctrl, 0x0000, b, 1, CAM_SENSOR_I2C_WRITE_SEQ, 0);
+			if (rc < 0)
+				return rc;
+		}
+		rc = k618_ois_rd(o_ctrl, 0x0201, b, 1);
+		if (rc < 0)
+			return rc;
+		if (b[0] != 1) {
+			b[0] = 0;
+			rc = k618_ois_wr(o_ctrl, 0x0200, b, 1, CAM_SENSOR_I2C_WRITE_SEQ, 0);
+			if (rc < 0)
+				return rc;
+		}
+	}
+	b[0] = 0x07;
+	rc = k618_ois_wr(o_ctrl, 0x1000, b, 1, CAM_SENSOR_I2C_WRITE_SEQ, 0);
+	if (rc < 0)
+		return rc;
+	msleep(60);
+	rc = k618_ois_rd(o_ctrl, 0x0001, b, 1);
+	if (rc < 0)
+		return rc;
+	if (b[0] != 2) {
+		CAM_ERR(CAM_OIS, "k618: [SEM1217S] %s: OIS firmware upgrade status check failed (0x%02x)",
+			o_ctrl->ois_name, b[0]);
+		return -EINVAL;
+	}
+	for (i = 0; i < K618_SEM1217S_FW_SIZE / 256; i++) {
+		const uint8_t *blk = img + 256 * i;
+
+		for (j = 0; j < 256; j += 2)
+			sum += blk[j] | (blk[j + 1] << 8);
+		rc = k618_ois_wr(o_ctrl, 0x1100, blk, 256, CAM_SENSOR_I2C_WRITE_SEQ, 0);
+		if (rc < 0) {
+			CAM_ERR(CAM_OIS, "k618: [SEM1217S] %s: Failed to write REG_DATA_BUF, index = %u",
+				o_ctrl->ois_name, i);
+			return rc;
+		}
+		msleep(20);
+	}
+	b[0] = sum & 0xff;
+	b[1] = (sum >> 8) & 0xff;
+	rc = k618_ois_wr(o_ctrl, 0x1002, b, 2, CAM_SENSOR_I2C_WRITE_SEQ, 0);
+	if (rc < 0)
+		return rc;
+	msleep(200);
+	rc = k618_ois_rd(o_ctrl, 0x1002, b, 2);
+	if (rc < 0)
+		return rc;
+	CAM_INFO(CAM_OIS, "k618: [SEM1217S] %s: REG_FWUP_CHKSUM written 0x%x, read 0x%x",
+		o_ctrl->ois_name, sum & 0xffff, b[0] | (b[1] << 8));
+	rc = k618_ois_rd(o_ctrl, 0x1001, b, 1);
+	if (rc < 0)
+		return rc;
+	if (b[0]) {
+		CAM_ERR(CAM_OIS, "k618: [SEM1217S] %s: Failed to update firmware, REG_FWUP_ERR = 0x%x",
+			o_ctrl->ois_name, b[0]);
+		return -EINVAL;
+	}
+	b[0] = 0x80;
+	rc = k618_ois_wr(o_ctrl, 0x1000, b, 1, CAM_SENSOR_I2C_WRITE_SEQ, 0);
+	if (rc < 0)
+		return rc;
+	msleep(200);
+	rc = k618_ois_rd(o_ctrl, 0x1008, b, 4);
+	if (rc < 0)
+		return rc;
+	ver = k618_le32(b);
+	if (ver != pkg) {
+		CAM_ERR(CAM_OIS, "k618: [SEM1217S] %s: firmware version %u after the update, wants %u",
+			o_ctrl->ois_name, ver, pkg);
+		return -EINVAL;
+	}
+	CAM_INFO(CAM_OIS, "k618: [SEM1217S] %s: Firmware update success, version %u",
+		o_ctrl->ois_name, ver);
+	return 0;
+}
+
+/*
+ * stock cam_ois_fw_download, chip id 0x4c1 (0x162d84): stands in for the generic download. The
+ * packaged version is the u32 at 0xbff4 of <ois_name>.prog (0xc000 bytes), the chip's REG_APP_VER
+ * 0x1008; a failed version read fails the INIT as on stock. Stock's semco_ois_fw_update_op
+ * (default 1) rewrites on any difference; here k618_ois_flash_update does, off by default.
+ */
+static int k618_sem1217s_fw(struct cam_ois_ctrl_t *o_ctrl)
+{
+	const struct firmware *fw = NULL;
+	char name[MAX_OIS_NAME_SIZE + 8];
+	uint8_t b[4] = {0};
+	uint32_t cur, pkg = 0;
+	bool have_pkg = false;
+	int rc;
+
+	snprintf(name, sizeof(name), "%s.prog", o_ctrl->ois_name);
+	rc = request_firmware(&fw, name, &(o_ctrl->pdev->dev));
+	if (rc) {
+		CAM_ERR(CAM_OIS, "k618: [SEM1217S] Failed to load firmware: %s (%d)", name, rc);
+		fw = NULL;
+	} else if (fw->size < K618_SEM1217S_FW_SIZE) {
+		CAM_ERR(CAM_OIS, "k618: [SEM1217S] %s is %zu bytes, the image has %d",
+			name, fw->size, K618_SEM1217S_FW_SIZE);
+	} else {
+		pkg = k618_le32(fw->data + K618_SEM1217S_VER_OFS);
+		have_pkg = true;
+	}
+	if (!have_pkg && k618_ois_flash_update) {
+		rc = rc ? rc : -EINVAL;	/* stock: no image, the INIT fails */
+		goto out;
+	}
+
+	rc = k618_ois_rd(o_ctrl, 0x1008, b, 4);
+	if (rc < 0)
+		goto out;
+	cur = k618_le32(b);
+	CAM_INFO(CAM_OIS, "k618: [SEM1217S] %s: current firmware version = %u, packaged = %u%s",
+		o_ctrl->ois_name, cur, pkg, have_pkg ? "" : " (no image)");
+	rc = 0;
+	if (have_pkg && cur != pkg) {
+		if (!k618_ois_flash_update)
+			CAM_INFO(CAM_OIS,
+				"k618: [SEM1217S] %s: versions differ, flash left as it is (camera.k618_ois_flash_update=0)",
+				o_ctrl->ois_name);
+		else
+			rc = k618_sem1217s_flash(o_ctrl, fw->data, cur, pkg);
+	}
+out:
+	release_firmware(fw);
+	return rc;
+}
+
+/* stock pflash_ois (.rodata 0x895e0) as the compare chains 0x1603e4-0x1605c0 / 0x15fd00-0x160328 */
+static int k618_ultra_chip_init(struct cam_ois_ctrl_t *o_ctrl)
+{
+	switch (o_ctrl->k618_ultra_type) {
+	case 1:
+	case 2:
+	case 3:
+	case 4:
+	case 7:
+		return k618_ultra_bu24721_init(o_ctrl);
+	case 5:
+		return k618_bu24532_init(o_ctrl);
+	case 6:
+		return k618_rumbas4h_init(o_ctrl);
+	default:	/* stock logs "need pkt function" (0x160d6c) and returns 0 */
+		CAM_ERR(CAM_OIS, "k618: OIS %s: type %u has no chip function",
+			o_ctrl->ois_name, o_ctrl->k618_ultra_type);
+		return 0;
+	}
+}
+
+/* called from cam_ois_slaveInfo_pkt_parser() after camera 16's 59-byte fields */
+static int k618_ultra_slave_info(struct cam_ois_ctrl_t *o_ctrl, const uint8_t *info, size_t len)
+{
+	const uint8_t *x = info + 0x38;
+
+	o_ctrl->k618_ultra_info = false;
+	o_ctrl->k618_ultra_type = 0;
+	o_ctrl->k618_ultra_chip_id = 0;
+	o_ctrl->k618_ultra_expect_id = 0;
+	if (!o_ctrl->k618_ultra)
+		return 0;
+	if (len < K618_ULTRA_SLAVE_INFO_LEN) {
+		CAM_ERR(CAM_OIS, "k618: OIS %s: slave info %zu bytes, the 13 Ultra's has %d",
+			o_ctrl->ois_name, len, K618_ULTRA_SLAVE_INFO_LEN);
+		return -EINVAL;
+	}
+	o_ctrl->k618_ultra_info = true;
+	o_ctrl->k618_ois_flag = 0;	/* camera 16's ROHM branch is the 13 Pro's; the type is below */
+	o_ctrl->k618_ultra_chip_id = x[2] | ((uint16_t)x[3] << 8);
+	o_ctrl->k618_ultra_expect_id = k618_le32(x + 4);
+	o_ctrl->k618_ultra_type = x[8];
+	CAM_INFO(CAM_OIS,
+		"k618: OIS %s (13 Ultra) slave info 0x38-0x40: %02x %02x %02x %02x %02x %02x %02x %02x %02x: address type %u, page step %u, chip id 0x%04x, expected id 0x%08x, type %u",
+		o_ctrl->ois_name, x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], x[8],
+		x[0], x[1], o_ctrl->k618_ultra_chip_id, o_ctrl->k618_ultra_expect_id,
+		o_ctrl->k618_ultra_type);
+	return 0;
+}
+
+/*
+ * INIT, after power-up: type != 0 runs the chip function (stock 0x1603e4; a nonzero result is
+ * "Failed OIS Customer Pkt Download", 0x1605cc). Type 0 goes on to the generic path; stock applies
+ * fwinit there whether or not ois_fw_flag is set (0x160410; the download alone is under the flag,
+ * 0x1604a8), 6.x only under the flag -- so with the flag clear it is applied here.
+ */
+static int k618_ultra_init(struct cam_ois_ctrl_t *o_ctrl)
+{
+	int rc;
+
+	if (o_ctrl->k618_ultra_type) {
+		o_ctrl->cam_ois_state = CAM_OIS_CONFIG;
+		rc = k618_ultra_chip_init(o_ctrl);
+		if (rc < 0) {
+			CAM_ERR(CAM_OIS, "k618: OIS %s: Failed OIS Customer Pkt Download: %d (type %u)",
+				o_ctrl->ois_name, rc, o_ctrl->k618_ultra_type);
+			return rc;
+		}
+		if (rc)	/* a poll at the end timed out: logged, as camera 16 does */
+			CAM_WARN(CAM_OIS, "k618: OIS %s: type %u: a poll timed out (%d)",
+				o_ctrl->ois_name, o_ctrl->k618_ultra_type, rc);
+		return K618_ULTRA_INIT_DONE;
+	}
+	if (!o_ctrl->ois_fw_flag && o_ctrl->i2c_fwinit_data.is_settings_valid == 1) {
+		rc = cam_ois_apply_settings(o_ctrl, &o_ctrl->i2c_fwinit_data);
+		if ((rc == -EAGAIN) && (o_ctrl->io_master_info.master_type == CCI_MASTER)) {
+			CAM_WARN(CAM_OIS, "k618: Reapplying fwinit settings");
+			usleep_range(1000, 1010);
+			rc = cam_ois_apply_settings(o_ctrl, &o_ctrl->i2c_fwinit_data);
+		}
+		if (rc) {
+			CAM_ERR(CAM_OIS, "k618: OIS %s: Cannot apply fwinit data %d",
+				o_ctrl->ois_name, rc);
+			return rc < 0 ? rc : -EINVAL;
+		}
+	}
+	return 0;
+}
+
+/* the generic path's download: a SEM1217S (chip id 0x4c1) gets its own, as stock 0x162d84 */
+static int k618_ultra_fw_download(struct cam_ois_ctrl_t *o_ctrl)
+{
+	if (o_ctrl->k618_ultra_info && o_ctrl->k618_ultra_chip_id == K618_SEM1217S_CHIP_ID)
+		return k618_sem1217s_fw(o_ctrl);
+	return cam_ois_fw_download(o_ctrl);
+}
+
+/* stock cam_ois_publish_dev_info (0x1613b8) */
+static int k618_ois_publish_dev_info(struct cam_req_mgr_device_info *info)
+{
+	if (!info) {
+		CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Invalid Args");
+		return -EINVAL;
+	}
+	info->dev_id = CAM_REQ_MGR_DEVICE_OIS;
+	strscpy(info->name, "cam-ois", sizeof(info->name));
+	info->p_delay = CAM_PIPELINE_DELAY_1;
+	info->m_delay = CAM_MODESWITCH_DELAY_1;	/* 6.x field (not in 5.15); as actuator and flash */
+	info->trigger = CAM_TRIGGER_POINT_SOF;
+	return 0;
+}
+
+/* stock cam_ois_establish_link (0x161444) */
+static int k618_ois_establish_link(struct cam_req_mgr_core_dev_link_setup *link)
+{
+	struct cam_ois_ctrl_t *o_ctrl;
+
+	if (!link) {
+		CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Invalid Args");
+		return -EINVAL;
+	}
+	o_ctrl = (struct cam_ois_ctrl_t *)cam_get_device_priv(link->dev_hdl);
+	if (!o_ctrl) {
+		CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Device data is NULL");
+		return -EINVAL;
+	}
+	mutex_lock(&(o_ctrl->ois_mutex));
+	if (link->link_enable) {
+		o_ctrl->bridge_intf.link_hdl = link->link_hdl;
+		o_ctrl->bridge_intf.crm_cb = link->crm_cb;
+	} else {
+		o_ctrl->bridge_intf.link_hdl = -1;
+		o_ctrl->bridge_intf.crm_cb = NULL;
+	}
+	mutex_unlock(&(o_ctrl->ois_mutex));
+	return 0;
+}
+
+/*
+ * stock cam_ois_apply_request (0x161974): the slot of this request id is applied and marked
+ * spent; a request in the skip table returns -EAGAIN while its count lasts, counting down (6.x's
+ * request manager does not count -EAGAIN as a failed retry); otherwise the slot two requests back
+ * is cleared.
+ */
+static int k618_ois_apply_request(struct cam_req_mgr_apply_request *apply)
+{
+	struct cam_ois_ctrl_t *o_ctrl;
+	struct i2c_settings_array *slot;
+	uint32_t n, idx, del;
+	int rc = 0;
+
+	if (!apply) {
+		CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Invalid Input Args");
+		return -EINVAL;
+	}
+	o_ctrl = (struct cam_ois_ctrl_t *)cam_get_device_priv(apply->dev_hdl);
+	if (!o_ctrl) {
+		CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Device data is NULL");
+		return -EINVAL;
+	}
+	n = ARRAY_SIZE(o_ctrl->k618_req_slot);
+	idx = apply->request_id % n;
+	CAM_DBG(CAM_OIS, "k618: [CRM-OIS] OIS apply request:%llu", apply->request_id);
+
+	mutex_lock(&(o_ctrl->ois_mutex));
+	slot = &(o_ctrl->k618_req_slot[idx]);
+	if ((slot->request_id == apply->request_id) && (slot->is_settings_valid == 1)) {
+		o_ctrl->k618_poll_go_on = 0;	/* per-frame settings fail fast */
+		rc = cam_ois_apply_settings(o_ctrl, slot);
+		if (rc < 0) {
+			CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Failed in applying the request: %llu.",
+				apply->request_id);
+			goto unlock;
+		}
+		slot->is_settings_valid = 0;
+		CAM_DBG(CAM_OIS, "k618: Apply setting at req %llu, rc = %d", apply->request_id, rc);
+	}
+
+	if ((o_ctrl->k618_skip_req[idx] == apply->request_id) && o_ctrl->k618_skip_cnt[idx]) {
+		CAM_INFO(CAM_OIS, "k618: [CRM-OIS] Skipframe number from %llu to %llu at request:%llu",
+			o_ctrl->k618_skip_cnt[idx], o_ctrl->k618_skip_cnt[idx] - 1,
+			apply->request_id);
+		if (!--o_ctrl->k618_skip_cnt[idx])
+			o_ctrl->k618_skip_req[idx] = 0;
+		rc = -EAGAIN;
+		goto unlock;
+	}
+
+	del = (idx + n - 2) % n;
+	slot = &(o_ctrl->k618_req_slot[del]);
+	if (apply->request_id > slot->request_id) {
+		slot->request_id = 0;
+		rc = delete_request(slot);
+		if (rc < 0)
+			CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Fail deleting the req: %u err: %d.", del, rc);
+	} else {
+		CAM_DBG(CAM_OIS, "k618: [CRM-OIS] No Valid Req to clean Up");
+	}
+unlock:
+	mutex_unlock(&(o_ctrl->ois_mutex));
+	return rc;
+}
+
+/* stock cam_ois_update_req_mgr (0x16152c); trigger_eof for packet 4 (0x16156c) */
+static int k618_ois_add_req(struct cam_ois_ctrl_t *o_ctrl, struct cam_packet *csl_packet)
+{
+	struct cam_req_mgr_add_request add_req = {0};
+	int rc;
+
+	add_req.link_hdl = o_ctrl->bridge_intf.link_hdl;
+	add_req.dev_hdl = o_ctrl->bridge_intf.device_hdl;
+	add_req.req_id = csl_packet->header.request_id;
+	if ((csl_packet->header.op_code & 0xFFFFFF) == K618_OIS_OPCODE_APERTURE)
+		add_req.trigger_eof = true;
+	if (!o_ctrl->bridge_intf.crm_cb || !o_ctrl->bridge_intf.crm_cb->add_req) {
+		CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Can't add Request ID: %llu to CRM",
+			add_req.req_id);
+		return -EINVAL;
+	}
+	rc = o_ctrl->bridge_intf.crm_cb->add_req(&add_req);
+	if (rc) {
+		if (rc == -EBADR)
+			CAM_INFO(CAM_OIS,
+				"k618: [CRM-OIS] Adding request: %llu failed: rc: %d, it has been flushed",
+				add_req.req_id, rc);
+		else
+			CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Adding request: %llu failed: rc: %d",
+				add_req.req_id, rc);
+		return rc;
+	}
+	CAM_DBG(CAM_OIS, "k618: [CRM-OIS] Request Id: %llu added to CRM", add_req.req_id);
+	return 0;
+}
+
+/*
+ * stock packet 0x7e (0x15fffc-0x160a68): the first buffer holds u64 request id, u64 count; the
+ * table keeps the count less one (0x160a44), apply_request holds that request so many frames
+ */
+static int k618_ois_skip_frame(struct cam_ois_ctrl_t *o_ctrl, struct cam_packet *csl_packet,
+	struct cam_cmd_buf_desc *cmd_desc)
+{
+	const uint64_t *p;
+	uintptr_t cpu = 0;
+	size_t len = 0;
+	uint32_t idx;
+	int rc;
+
+	CAM_DBG(CAM_OIS, "k618: [SkipFrame] num_cmd_buf %u", csl_packet->num_cmd_buf);
+	if (!csl_packet->num_cmd_buf) {
+		CAM_ERR(CAM_OIS, "k618: [SkipFrame] Recvied skip frame packet is empty.");
+		return -EINVAL;
+	}
+	if (cmd_desc->length < 2 * sizeof(uint64_t)) {
+		CAM_ERR(CAM_OIS, "k618: [SkipFrame] Insufficient number of packet bytes received: %u.",
+			cmd_desc->length);
+		return -EINVAL;
+	}
+	rc = cam_mem_get_cpu_buf(cmd_desc->mem_handle, &cpu, &len);
+	if (rc < 0) {
+		CAM_ERR(CAM_OIS, "k618: [SkipFrame] Failed to get cpu buf: 0x%x", cmd_desc->mem_handle);
+		return rc;
+	}
+	if (!cpu || len < 2 * sizeof(uint64_t) || len - 2 * sizeof(uint64_t) < cmd_desc->offset) {
+		CAM_ERR(CAM_OIS, "k618: [SkipFrame] Invalid length for skip frame packet");
+		rc = -EINVAL;
+		goto put;
+	}
+	p = (const uint64_t *)(cpu + (cmd_desc->offset & ~3U));
+	if (p[1]) {
+		idx = p[0] % ARRAY_SIZE(o_ctrl->k618_skip_req);
+		o_ctrl->k618_skip_req[idx] = p[0];
+		o_ctrl->k618_skip_cnt[idx] = p[1] - 1;
+		CAM_INFO(CAM_OIS, "k618: [SkipFrame] skip reqId: %llu, skip num: %llu queue index:%u",
+			o_ctrl->k618_skip_req[idx], o_ctrl->k618_skip_cnt[idx], idx);
+	}
+put:
+	cam_mem_put_cpu_buf(cmd_desc->mem_handle);
+	return rc;
+}
+
+/*
+ * stock packet 5 (0x15f510-0x15f6a4, 0x15fcfc, 0x160d8c): its buffers fill calib (when
+ * is_ois_calib) and then postinit; with o_ctrl+0x11d8 set (k618_ultra_redl) the type's chip
+ * function runs again; the two buffers are deleted. No state check, as stock.
+ */
+static int k618_ultra_redownload(struct cam_ois_ctrl_t *o_ctrl, struct cam_packet *csl_packet,
+	struct cam_cmd_buf_desc *cmd_desc)
+{
+	struct i2c_settings_array *set;
+	uintptr_t ptr = 0;
+	size_t len = 0;
+	uint32_t i;
+	int rc = 0;
+
+	CAM_DBG(CAM_OIS, "k618: OIS %s: num_cmd_buf %u", o_ctrl->ois_name, csl_packet->num_cmd_buf);
+	for (i = 0; i < csl_packet->num_cmd_buf; i++) {
+		if (!cmd_desc[i].length)
+			continue;
+		rc = cam_packet_util_validate_cmd_desc(&cmd_desc[i]);
+		if (rc) {
+			CAM_ERR(CAM_OIS, "k618: OIS %s: invalid cmd desc %u", o_ctrl->ois_name, i);
+			goto out;
+		}
+		rc = cam_mem_get_cpu_buf(cmd_desc[i].mem_handle, &ptr, &len);
+		if (rc < 0) {
+			CAM_ERR(CAM_OIS, "k618: OIS %s: Failed to get cpu buf: 0x%x",
+				o_ctrl->ois_name, cmd_desc[i].mem_handle);
+			goto out;
+		}
+		cam_mem_put_cpu_buf(cmd_desc[i].mem_handle);
+		if (!ptr || len < 8 || len - 8 < cmd_desc[i].offset) {	/* stock 0x15f6d0 */
+			CAM_ERR(CAM_OIS, "k618: OIS %s: invalid length of cmd buf %u",
+				o_ctrl->ois_name, i);
+			rc = -EINVAL;
+			goto out;
+		}
+		if (o_ctrl->is_ois_calib && (o_ctrl->i2c_calib_data.is_settings_valid == 0))
+			set = &(o_ctrl->i2c_calib_data);
+		else if (o_ctrl->k618_postinit_data.is_settings_valid == 0)
+			set = &(o_ctrl->k618_postinit_data);
+		else
+			continue;
+		set->is_settings_valid = 1;
+		set->request_id = 0;
+		rc = cam_sensor_i2c_command_parser(&(o_ctrl->io_master_info), set, &cmd_desc[i], 1,
+			NULL);
+		if (rc < 0) {
+			CAM_ERR(CAM_OIS, "k618: OIS %s: re-download settings parsing failed: %d",
+				o_ctrl->ois_name, rc);
+			goto out;
+		}
+	}
+	if (o_ctrl->k618_ultra_info && o_ctrl->k618_ultra_type) {
+		o_ctrl->k618_ultra_redl = true;
+		rc = k618_ultra_chip_init(o_ctrl);
+		o_ctrl->k618_ultra_redl = false;
+		if (rc < 0)
+			CAM_ERR(CAM_OIS, "k618: OIS %s: Failed OIS Customer Pkt Download: %d",
+				o_ctrl->ois_name, rc);
+		else
+			rc = 0;
+	}
+out:
+	if (o_ctrl->i2c_calib_data.is_settings_valid == 1)
+		delete_request(&(o_ctrl->i2c_calib_data));
+	if (o_ctrl->k618_postinit_data.is_settings_valid == 1)
+		delete_request(&(o_ctrl->k618_postinit_data));
+	return rc;
+}
+
+/* cam_ois_pkt_parse(): stock packets 4, 5, 6, 0x7e and 0x7f (jump table 0x15f308, 0x15f3a8) */
+static int k618_ultra_pkt(struct cam_ois_ctrl_t *o_ctrl, struct cam_packet *csl_packet)
+{
+	uint32_t op = csl_packet->header.op_code & 0xFFFFFF;
+	uint32_t *offset = (uint32_t *)&csl_packet->payload_flex;
+	struct cam_cmd_buf_desc *cmd_desc;
+	struct i2c_settings_array *slot;
+	uint64_t req = csl_packet->header.request_id;
+	int rc;
+
+	offset += (csl_packet->cmd_buf_offset / sizeof(uint32_t));
+	cmd_desc = (struct cam_cmd_buf_desc *)(offset);
+
+	switch (op) {
+	case K618_OIS_OPCODE_APERTURE:	/* 0x15f4c0, 0x15ff64 */
+		if (o_ctrl->cam_ois_state < CAM_OIS_CONFIG) {
+			CAM_WARN(CAM_OIS, "k618: [CRM-OIS] Not in right state to control OIS: %d",
+				o_ctrl->cam_ois_state);
+			return -EINVAL;
+		}
+		CAM_DBG(CAM_OIS, "k618: [CRM-OIS] Received aperture mode packets");
+		slot = &(o_ctrl->k618_req_slot[req % ARRAY_SIZE(o_ctrl->k618_req_slot)]);
+		/* a slot left from a request 32 back is emptied first (stock appends to it) */
+		if (slot->request_id != req && !list_empty(&(slot->list_head)))
+			delete_request(slot);
+		slot->request_id = req;
+		slot->is_settings_valid = 1;
+		rc = cam_sensor_i2c_command_parser(&(o_ctrl->io_master_info), slot, cmd_desc, 1,
+			NULL);
+		if (rc < 0) {
+			CAM_ERR(CAM_OIS, "k618: [CRM-OIS] CRM OIS parsing failed: %d", rc);
+			return rc;
+		}
+		rc = k618_ois_add_req(o_ctrl, csl_packet);
+		if (rc)
+			CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Failed in adding request to request manager");
+		return rc;
+	case CAM_PKT_NOP_OPCODE:	/* 0x15f3b0, 0x15fd30 */
+		if (o_ctrl->cam_ois_state < CAM_OIS_CONFIG) {
+			CAM_DBG(CAM_OIS, "k618: [CRM-OIS] Received NOP packets in invalid state: %d",
+				o_ctrl->cam_ois_state);
+			return -EINVAL;
+		}
+		rc = k618_ois_add_req(o_ctrl, csl_packet);
+		if (rc)
+			CAM_ERR(CAM_OIS, "k618: [CRM-OIS] Failed in adding request to request manager");
+		return rc;
+	case K618_OIS_OPCODE_SKIPFRAME:	/* 0x15f604 */
+		if (o_ctrl->cam_ois_state < CAM_OIS_CONFIG) {
+			CAM_WARN(CAM_OIS,
+				"k618: [SkipFrame] Recvied skip frame packet in invalid state: %d",
+				o_ctrl->cam_ois_state);
+			return -EINVAL;
+		}
+		return k618_ois_skip_frame(o_ctrl, csl_packet, cmd_desc);
+	case K618_OIS_OPCODE_REDOWNLOAD:	/* 0x15f510 */
+		return k618_ultra_redownload(o_ctrl, csl_packet, cmd_desc);
+	case K618_OIS_OPCODE_PARKLENS:	/* 0x15f560 */
+		/*
+		 * Stock parses the packet's park settings into o_ctrl+0xf88 and starts
+		 * "parklens-thread", which walks them after release and then powers the OIS
+		 * down; release skips its own power-down while the thread runs (0x15ee6c). Not
+		 * ported: the packet is accepted, nothing is applied, and release powers the OIS
+		 * down at once, as 6.x does and as stock does when no park thread was started.
+		 */
+		if (o_ctrl->cam_ois_state < CAM_OIS_CONFIG)
+			return -EINVAL;
+		CAM_DBG(CAM_OIS, "k618: OIS %s: park-lens packet (not ported) for request %llu",
+			o_ctrl->ois_name, req);
+		return 0;
+	default:
+		CAM_ERR(CAM_OIS, "Invalid Opcode: %d", op);
+		return -EINVAL;
+	}
+}
+
+/*
+ * stock 0x15f280-0x15f2f4: a packet other than INIT for a request at or below the last flushed
+ * one is refused, -EBADR. Only flush_req sets that id (0x161768), and stock registers flush_req
+ * for the I2C variant only (0x1583c4) -- these OIS are platform devices -- so on both phones the
+ * id stays 0 and nothing is refused.
+ */
+static int k618_ultra_flush_check(struct cam_ois_ctrl_t *o_ctrl, struct cam_packet *csl_packet)
+{
+	uint64_t req = csl_packet->header.request_id;
+
+	if ((csl_packet->header.op_code & 0xFFFFFF) && o_ctrl->k618_last_flush_req &&
+		(req <= o_ctrl->k618_last_flush_req)) {
+		CAM_INFO(CAM_OIS, "k618: reject request %llu, last request to flush %llu",
+			req, o_ctrl->k618_last_flush_req);
+		return -EBADR;
+	}
+	if (req > o_ctrl->k618_last_flush_req)
+		o_ctrl->k618_last_flush_req = 0;
+	return 0;
+}
+
+/*
+ * stock cam_sensor_i2c_read_write_ois_data (0x173ac8), which the 13 Ultra's OIS read packet uses
+ * (0x15fe74) in place of cam_sensor_i2c_read_data: a random write in the list is sent where it
+ * stands (6.x stops at it, -EINVAL: it has no read buffer), and a read lands after the bytes of
+ * the read before it in the shared output buffer (6.x puts every read at the buffer's start).
+ * The bound check against the buffer's end, offset included, is added here.
+ */
+static int k618_ultra_read_data(struct cam_ois_ctrl_t *o_ctrl, struct i2c_settings_array *set)
+{
+	struct i2c_settings_list *i2c_list;
+	uint32_t prev = 0, len, cnt;
+	uint8_t *buf;
+	int rc = 0;
+
+	if (!o_ctrl->k618_ultra)
+		return cam_sensor_i2c_read_data(set, &(o_ctrl->io_master_info));
+
+	list_for_each_entry(i2c_list, &(set->list_head), list) {
+		struct cam_sensor_i2c_reg_setting *s = &(i2c_list->i2c_settings);
+
+		if (i2c_list->op_code == CAM_SENSOR_I2C_WRITE_RANDOM) {
+			rc = camera_io_dev_write(&(o_ctrl->io_master_info), s);
+			if (rc) {
+				CAM_ERR(CAM_OIS, "k618: OIS %s: write failed rc %d", o_ctrl->ois_name, rc);
+				return rc;
+			}
+			continue;
+		}
+		if (!s->read_buff || !s->read_buff_len) {
+			CAM_ERR(CAM_OIS, "k618: Invalid input buffer, buffer: %pK, length: %d",
+				s->read_buff, s->read_buff_len);
+			return -EINVAL;
+		}
+		if (i2c_list->op_code == CAM_SENSOR_I2C_READ_SEQ) {
+			len = s->size;
+			if (len > s->read_buff_len || prev > s->read_buff_len - len) {
+				CAM_ERR(CAM_OIS, "k618: Invalid size, readLen:%u, offset:%u, bufLen:%u",
+					len, prev, s->read_buff_len);
+				return -EINVAL;
+			}
+			rc = camera_io_dev_read_seq(&(o_ctrl->io_master_info),
+				s->reg_setting[0].reg_addr, s->read_buff + prev, s->addr_type,
+				s->data_type, len);
+			if (rc < 0) {
+				CAM_ERR(CAM_OIS, "k618: failed: seq read I2C settings: %d", rc);
+				return rc;
+			}
+			prev = len;
+		} else if (i2c_list->op_code == CAM_SENSOR_I2C_READ_RANDOM) {
+			len = s->data_type * s->size;
+			if (len > s->read_buff_len || len < s->size || prev > s->read_buff_len - len) {
+				CAM_ERR(CAM_OIS,
+					"k618: Invalid size, readLen:%u, offset:%u, bufLen:%u, size: %u",
+					len, prev, s->read_buff_len, s->size);
+				return -EINVAL;
+			}
+			buf = s->read_buff + prev;
+			for (cnt = 0; cnt < s->size; cnt++) {
+				rc = camera_io_dev_read(&(o_ctrl->io_master_info),
+					s->reg_setting[cnt].reg_addr, &(s->reg_setting[cnt].reg_data),
+					s->addr_type, s->data_type, false);
+				if (rc < 0) {
+					CAM_ERR(CAM_OIS, "k618: Failed: random read I2C settings: %d", rc);
+					return rc;
+				}
+				if (s->data_type <= CAMERA_SENSOR_I2C_TYPE_DWORD) {
+					memcpy(buf, &(s->reg_setting[cnt].reg_data), s->data_type);
+					buf += s->data_type;
+				}
+			}
+			prev = len;
+		}
+	}
+	return rc;
+}
+
+/* stock CAM_START_DEV (0x15eca8) */
+static void k618_ultra_start(struct cam_ois_ctrl_t *o_ctrl)
+{
+	if (o_ctrl->k618_ultra)
+		o_ctrl->k618_last_flush_req = 0;
+}
+
+/* stock CAM_STOP_DEV (0x15ed68-0x15ed80) */
+static void k618_ultra_stop(struct cam_ois_ctrl_t *o_ctrl)
+{
+	if (!o_ctrl->k618_ultra)
+		return;
+	o_ctrl->k618_last_flush_req = 0;
+	memset(o_ctrl->k618_skip_req, 0, sizeof(o_ctrl->k618_skip_req));
+	memset(o_ctrl->k618_skip_cnt, 0, sizeof(o_ctrl->k618_skip_cnt));
+}
+
+/*
+ * stock CAM_RELEASE_DEV (0x15eec0-0x15efb8): skip table and flush id cleared, the request slots
+ * deleted. Stock deletes the slots still marked valid; here also a slot already applied whose
+ * list apply_request had not cleared yet. Called from cam_ois_shutdown() as well.
+ */
+static void k618_ultra_release(struct cam_ois_ctrl_t *o_ctrl)
+{
+	uint32_t i;
+
+	if (!o_ctrl->k618_ultra)
+		return;
+	o_ctrl->k618_last_flush_req = 0;
+	memset(o_ctrl->k618_skip_req, 0, sizeof(o_ctrl->k618_skip_req));
+	memset(o_ctrl->k618_skip_cnt, 0, sizeof(o_ctrl->k618_skip_cnt));
+	for (i = 0; i < ARRAY_SIZE(o_ctrl->k618_req_slot); i++) {
+		if ((o_ctrl->k618_req_slot[i].is_settings_valid == 1) ||
+			!list_empty(&(o_ctrl->k618_req_slot[i].list_head)))
+			delete_request(&(o_ctrl->k618_req_slot[i]));
+		o_ctrl->k618_req_slot[i].request_id = 0;
+	}
+}
+
+/*
+ * The live device tree's root "model": "Qualcomm Technologies, Inc. 8550 nuwa" on the 13 Pro,
+ * "... 8550 ishtar" in the 13 Ultra's dtbo overlay; compatible and qcom,board-id are the same.
+ */
+static bool k618_ois_is_ishtar(void)
+{
+	struct device_node *root = of_find_node_by_path("/");
+	const char *model = NULL;
+	bool ishtar = false;
+
+	if (!root)
+		return false;
+	if (!of_property_read_string(root, "model", &model) && model)
+		ishtar = strstr(model, "ishtar") != NULL;
+	of_node_put(root);
+	return ishtar;
+}
+
+/* from cam_ois_driver_soc_init(): stock cam_ois_component_bind 0x157970-0x157bdc */
+void k618_ois_ultra_setup(struct cam_ois_ctrl_t *o_ctrl)
+{
+	uint32_t i;
+
+	for (i = 0; i < ARRAY_SIZE(o_ctrl->k618_req_slot); i++)
+		INIT_LIST_HEAD(&(o_ctrl->k618_req_slot[i].list_head));
+	o_ctrl->k618_ultra = k618_ois_is_ishtar();
+	if (!o_ctrl->k618_ultra)
+		return;
+	o_ctrl->bridge_intf.link_hdl = -1;
+	o_ctrl->bridge_intf.ops.get_dev_info = k618_ois_publish_dev_info;
+	o_ctrl->bridge_intf.ops.link_setup = k618_ois_establish_link;
+	o_ctrl->bridge_intf.ops.apply_req = k618_ois_apply_request;
+	CAM_INFO(CAM_OIS, "k618: OIS %u: 13 Ultra -- request-manager device, 65-byte slave info",
+		o_ctrl->soc_info.index);
+}
+"""
+
+EDITS += [
+# --- camera 24: the 13 Ultra's OIS, after its own 5.15 camera.ko (ishtar OS3.0.308.0;
+# see CAM_OIS_ULTRA). Its slave info is 65 bytes -- chip id at 0x3a, expected program id at 0x3c,
+# OIS type at 0x40, where camera 16 (59 bytes) reads the type at 0x3a; the type picks BU24721
+# (1-4, 7), BU24532 (5), RUMBA-S4H (6) or the generic path (0; chip id 0x4c1 = SEM1217S). The OIS
+# is a request-manager device there ("cam-ois", dev id 10) with per-request packets. Chosen by the
+# root "model" (k618_ois_is_ishtar); the 13 Pro runs camera 16's paths as before.
+    # struct fields, after camera 16's last one
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_dev.h",
+     "\tint k618_poll_go_on;\t/* k618: bring-up polls that may still time out and go on */\n",
+     "\tint k618_poll_go_on;\t/* k618: bring-up polls that may still time out and go on */\n"
+     "\t/* k618: camera 24 -- the 13 Ultra (k618_ultra_* in cam_ois_core.c) */\n"
+     "\tbool     k618_ultra;\t\t/* root model names ishtar: request-manager ops, 65-byte slave info */\n"
+     "\tbool     k618_ultra_info;\t/* this INIT's slave info had the 65 bytes */\n"
+     "\tbool     k618_ultra_redl;\t/* packet 5 running (stock o_ctrl+0x11d8) */\n"
+     "\tuint8_t  k618_ultra_type;\t/* slave info 0x40 (stock +0xe8a) */\n"
+     "\tuint16_t k618_ultra_chip_id;\t/* slave info 0x3a (stock +0xe84) */\n"
+     "\tuint32_t k618_ultra_expect_id;\t/* slave info 0x3c (stock +0xe86) */\n"
+     "\tuint64_t k618_last_flush_req;\t/* stock +0xfc8 */\n"
+     "\tstruct i2c_settings_array k618_req_slot[32];\t/* stock +0xf38: packet 4, by request id % 32 */\n"
+     "\tuint64_t k618_skip_req[32];\t/* stock +0xfd8: packet 0x7e, by request id % 32 */\n"
+     "\tuint64_t k618_skip_cnt[32];\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_dev.h",
+     "void cam_ois_driver_exit(void);\n",
+     "void cam_ois_driver_exit(void);\n"
+     "\n"
+     "/* k618: camera 24 -- cam_ois_core.c, called from cam_ois_driver_soc_init() */\n"
+     "void k618_ois_ultra_setup(struct cam_ois_ctrl_t *o_ctrl);\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_soc.c",
+     "\tINIT_LIST_HEAD(&(o_ctrl->k618_postinit_data.list_head));\t/* k618 */\n",
+     "\tINIT_LIST_HEAD(&(o_ctrl->k618_postinit_data.list_head));\t/* k618 */\n"
+     "\tk618_ois_ultra_setup(o_ctrl);\t/* k618: camera 24 */\n"),
+    # the device id stock's OIS publishes (10, one past TPG); nothing indexes by it or by MAX in
+    # 6.x, and it does not reach user space
+    ("camera-kernel/drivers/cam_req_mgr/cam_req_mgr_interface.h",
+     "\tCAM_REQ_MGR_DEVICE_TPG,\n"
+     "\tCAM_REQ_MGR_DEVICE_ID_MAX,\n",
+     "\tCAM_REQ_MGR_DEVICE_TPG,\n"
+     "\tCAM_REQ_MGR_DEVICE_OIS,\t/* k618: camera 24 -- the 13 Ultra's OIS, 10 as on its 5.15 */\n"
+     "\tCAM_REQ_MGR_DEVICE_ID_MAX,\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "#define CAM_OIS_FW_VERSION_CHECK_MASK 0x1\n",
+     "#define CAM_OIS_FW_VERSION_CHECK_MASK 0x1\n" + CAM_OIS_ULTRA_DECL),
+    # slave info: after camera 16's fields and its log line
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\t\to_ctrl->k618_fw_page_inc, o_ctrl->k618_ois_flag);\n",
+     "\t\t\to_ctrl->k618_fw_page_inc, o_ctrl->k618_ois_flag);\n"
+     "\t\t/* k618: camera 24 -- the 13 Ultra's 65-byte slave info */\n"
+     "\t\trc = k618_ultra_slave_info(o_ctrl, (const uint8_t *)ois_info, len);\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\tswitch (csl_packet->header.op_code & 0xFFFFFF) {\n",
+     "\t/* k618: camera 24 -- stock refuses packets of a flushed request (see k618_ultra_flush_check) */\n"
+     "\tif (o_ctrl->k618_ultra) {\n"
+     "\t\trc = k618_ultra_flush_check(o_ctrl, csl_packet);\n"
+     "\t\tif (rc)\n"
+     "\t\t\tgoto end;\n"
+     "\t}\n"
+     "\n"
+     "\tswitch (csl_packet->header.op_code & 0xFFFFFF) {\n"),
+    # INIT, after power-up: after camera 16's ROHM branch and its "ois_fw_flag" line
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\tCAM_DBG(CAM_OIS, \"ois_fw_flag: %d\", o_ctrl->ois_fw_flag);\n",
+     "\t\tCAM_DBG(CAM_OIS, \"ois_fw_flag: %d\", o_ctrl->ois_fw_flag);\n"
+     "\t\t/* k618: camera 24 -- the 13 Ultra's chip types, and its fwinit with ois_fw_flag clear */\n"
+     "\t\tif (o_ctrl->k618_ultra_info) {\n"
+     "\t\t\trc = k618_ultra_init(o_ctrl);\n"
+     "\t\t\tif (rc < 0)\n"
+     "\t\t\t\tgoto pwr_dwn;\n"
+     "\t\t\tif (rc == K618_ULTRA_INIT_DONE) {\n"
+     "\t\t\t\trc = 0;\n"
+     "\t\t\t\tgoto k618_init_done;\n"
+     "\t\t\t}\n"
+     "\t\t}\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\t\t\t\trc = cam_ois_fw_download(o_ctrl);\n",
+     "\t\t\t\t\trc = k618_ultra_fw_download(o_ctrl);\t/* k618: camera 24 (SEM1217S) */\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\trc = cam_sensor_i2c_read_data(\n"
+     "\t\t\t&i2c_read_settings,\n"
+     "\t\t\t&o_ctrl->io_master_info);\n",
+     "\t\trc = k618_ultra_read_data(o_ctrl,\t/* k618: camera 24; elsewhere cam_sensor_i2c_read_data */\n"
+     "\t\t\t&i2c_read_settings);\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\tdefault:\n"
+     "\t\tCAM_ERR(CAM_OIS, \"Invalid Opcode: %d\",\n",
+     "\tcase K618_OIS_OPCODE_APERTURE:\n"
+     "\tcase K618_OIS_OPCODE_REDOWNLOAD:\n"
+     "\tcase K618_OIS_OPCODE_PARKLENS:\n"
+     "\tcase K618_OIS_OPCODE_SKIPFRAME:\n"
+     "\tcase CAM_PKT_NOP_OPCODE:\n"
+     "\t\t/* k618: camera 24 -- the 13 Ultra's packets; elsewhere as before */\n"
+     "\t\tif (o_ctrl->k618_ultra) {\n"
+     "\t\t\trc = k618_ultra_pkt(o_ctrl, csl_packet);\n"
+     "\t\t\tgoto end;\n"
+     "\t\t}\n"
+     "\t\tCAM_ERR(CAM_OIS, \"Invalid Opcode: %d\",\n"
+     "\t\t\t(csl_packet->header.op_code & 0xFFFFFF));\n"
+     "\t\trc = -EINVAL;\n"
+     "\t\tgoto end;\n"
+     "\tdefault:\n"
+     "\t\tCAM_ERR(CAM_OIS, \"Invalid Opcode: %d\",\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\to_ctrl->cam_ois_state = CAM_OIS_START;\n",
+     "\t\tk618_ultra_start(o_ctrl);\t/* k618: camera 24 */\n"
+     "\t\to_ctrl->cam_ois_state = CAM_OIS_START;\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\to_ctrl->cam_ois_state = CAM_OIS_CONFIG;\n"
+     "\t\tbreak;\n"
+     "\tcase CAM_FLUSH_REQ:\n",
+     "\t\to_ctrl->cam_ois_state = CAM_OIS_CONFIG;\n"
+     "\t\tk618_ultra_stop(o_ctrl);\t/* k618: camera 24 */\n"
+     "\t\tbreak;\n"
+     "\tcase CAM_FLUSH_REQ:\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\t\to_ctrl->bridge_intf.session_hdl = -1;\n"
+     "\t\to_ctrl->cam_ois_state = CAM_OIS_INIT;\n",
+     "\t\to_ctrl->bridge_intf.session_hdl = -1;\n"
+     "\t\to_ctrl->cam_ois_state = CAM_OIS_INIT;\n"
+     "\t\tk618_ultra_release(o_ctrl);\t/* k618: camera 24 */\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "\tif (o_ctrl->cam_ois_state == CAM_OIS_INIT)\n"
+     "\t\treturn;\n",
+     "\tif (o_ctrl->cam_ois_state == CAM_OIS_INIT)\n"
+     "\t\treturn;\n"
+     "\n"
+     "\tk618_ultra_release(o_ctrl);\t/* k618: camera 24 */\n"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_ois/cam_ois_core.c",
+     "#ifdef OPLUS_FEATURE_CAMERA_COMMON\n"
+     "EXPORT_SYMBOL(cam_ois_driver_cmd);\n"
+     "#endif\n",
+     "#ifdef OPLUS_FEATURE_CAMERA_COMMON\n"
+     "EXPORT_SYMBOL(cam_ois_driver_cmd);\n"
+     "#endif\n" + CAM_OIS_ULTRA),
+]
+
+
 EDITS += [
 
 
@@ -3771,6 +5246,73 @@ EDITS += [
      "\t__u32                    k618_xiaomi_pad;\n"
      "\t__u64                    resource_hdl;\n"
      "\tstruct cam_acquired_hw_info hw_info;"),
+
+    # ---- camera 23 (the 13 Ultra): qcom,csiphy-v2.1.2-m1, 4 of its 8 PHYs. Unknown to this
+    # driver ("invalid hw version", the PHY does not probe). Its stock 5.15 camera.ko (ishtar
+    # OS3.0.308.0.WMACNXM; ctrl_reg_2_1_2_m1 -> csiphy_2ph_v2_1_2_reg_m1, symbols kept) differs from
+    # its own 2.1.2 D-PHY table in 28 entries -- six registers of the per-lane template, on every
+    # lane: 94h 07 -> d0, 00h 8e -> 92, 14h 60 -> 20, 04h 0c -> 0d, 10h 52 -> 72 and the skew-cal
+    # 60h bd -> bc. The template here is the same registers per lane (offsets in csiphy_ln_offsets),
+    # so -m1 is this table with those six values; the rest of 2.1.2 is shared.
+    ("camera-kernel/drivers/cam_sensor_module/cam_csiphy/include/cam_csiphy_2_1_2_hwreg.h",
+     "#endif /* _CAM_CSIPHY_2_1_2_HWREG_H_ */",
+     "/* k618 camera 23: the 13 Ultra's qcom,csiphy-v2.1.2-m1 (see k618_tp_fix.py) */\n"
+     "struct csiphy_reg_t csiphy_2ph_v2_1_2_reg_m1[] = {\n"
+     "\t{0x0094, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x00A0, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x0090, 0x0f, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x0098, 0x08, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x0094, 0xD0, 0x01, CSIPHY_DEFAULT_PARAMS},\t/* 2.1.2: 0x07 */\n"
+     "\t{0x0030, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x0028, 0x0A, 0x00, CSIPHY_2PH_SEC_CLK_LN_SETTINGS},\n"
+     "\t{0x0000, 0x92, 0x00, CSIPHY_DEFAULT_PARAMS},\t/* 2.1.2: 0x8E */\n"
+     "\t{0x0038, 0xFE, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x002C, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x0034, 0x0F, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x001C, 0x0A, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x0014, 0x20, 0x00, CSIPHY_DEFAULT_PARAMS},\t/* 2.1.2: 0x60 */\n"
+     "\t{0x003C, 0xB8, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x0004, 0x0D, 0x00, CSIPHY_DEFAULT_PARAMS},\t/* 2.1.2: 0x0C */\n"
+     "\t{0x0020, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},\n"
+     "\t{0x0008, 0x10, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},\n"
+     "\t{0x0010, 0x72, 0x00, CSIPHY_DEFAULT_PARAMS},\t/* 2.1.2: 0x52 */\n"
+     "\t{0x0094, 0xD7, 0x00, CSIPHY_SKEW_CAL},\n"
+     "\t{0x005C, 0x04, 0x00, CSIPHY_SKEW_CAL},\n"
+     "\t{0x0060, 0xBC, 0x00, CSIPHY_SKEW_CAL},\t/* 2.1.2: 0xBD */\n"
+     "\t{0x0064, 0x7F, 0x00, CSIPHY_SKEW_CAL},\n"
+     "};\n\n"
+     "struct csiphy_ctrl_t ctrl_reg_2_1_2_m1 = {\n"
+     "\t.csiphy_common_reg = csiphy_common_reg_2_1_2,\n"
+     "\t.csiphy_2ph_reg = csiphy_2ph_v2_1_2_reg_m1,\n"
+     "\t.csiphy_2ph_clk_ln_reg = csiphy_2ph_v2_1_2_clk_ln_reg,\n"
+     "\t.csiphy_3ph_reg = csiphy_3ph_v2_1_2_reg,\n"
+     "\t.csiphy_reg = &csiphy_v2_1_2,\n"
+     "\t.csiphy_irq_reg = csiphy_irq_reg_2_1_2,\n"
+     "\t.csiphy_reset_enter_regs = csiphy_reset_enter_reg_2_1_2,\n"
+     "\t.csiphy_reset_exit_regs = csiphy_reset_exit_reg_2_1_2,\n"
+     "\t.csiphy_lane_config_reg = csiphy_lane_en_reg_2_1_2,\n"
+     "\t.csiphy_ln_offsets[DPHY_DATA_LANE_POS_0] = 0x0000,\n"
+     "\t.csiphy_ln_offsets[DPHY_DATA_LANE_POS_1] = 0x0400,\n"
+     "\t.csiphy_ln_offsets[DPHY_DATA_LANE_POS_2] = 0x0800,\n"
+     "\t.csiphy_ln_offsets[DPHY_DATA_LANE_POS_3] = 0x0C00,\n"
+     "\t.csiphy_ln_offsets[DPHY_CLOCK_LANE_POS] = 0x0E00,\n"
+     "\t.csiphy_ln_offsets[CPHY_LANE_POS_0] = 0x0200,\n"
+     "\t.csiphy_ln_offsets[CPHY_LANE_POS_1] = 0x0600,\n"
+     "\t.csiphy_ln_offsets[CPHY_LANE_POS_2] = 0x0A00,\n"
+     "\t.data_rates_settings_table = &data_rate_delta_table_2_1_2,\n"
+     "\t.csiphy_bist_reg = &bist_setting_2_1_2,\n"
+     "\t.getclockvoting = get_clk_voting_dynamic,\n"
+     "};\n\n"
+     "#endif /* _CAM_CSIPHY_2_1_2_HWREG_H_ */"),
+    ("camera-kernel/drivers/cam_sensor_module/cam_csiphy/cam_csiphy_soc.c",
+     "\t} else if (of_device_is_compatible(soc_info->dev->of_node, \"qcom,csiphy-v2.1.2\")) {\n",
+     "\t} else if (of_device_is_compatible(soc_info->dev->of_node, \"qcom,csiphy-v2.1.2-m1\")) {\n"
+     "\t\t/* k618 camera 23: the 13 Ultra (cam_csiphy_2_1_2_hwreg.h) */\n"
+     "\t\tcsiphy_dev->ctrl_reg = &ctrl_reg_2_1_2_m1;\n"
+     "\t\tcsiphy_dev->hw_version = CSIPHY_VERSION_V212;\n"
+     "\t\tcsiphy_dev->is_divisor_32_comp = true;\n"
+     "\t\tcsiphy_dev->clk_lane = 0;\n"
+     "\t} else if (of_device_is_compatible(soc_info->dev->of_node, \"qcom,csiphy-v2.1.2\")) {\n"),
 ]
 
 
@@ -3945,6 +5487,60 @@ EDITS += [
      '\t\t\t\tpanel->name, rc);\n'
      '\t}\n'
      '\tk618_mi_disp_post_lp(panel, rc);\t/* k618: in AOD -- the doze level asked for */\n'),
+]
+
+
+# The 13's M3 and the 13 Ultra's M1 panels (k618_mi_disp.c)
+# The 13 Ultra's DBI-BWG and skip-source command sets (stock cmd_set_prop_map entries 88..123 of
+# the 5.15 msm_drm.ko, .data+0x7f40), selected by DBV band and panel temperature in
+# k618_m1_dbi() (stock mi_dsi_panel_vrr_set_by_dbv 0x18f4f4). Names exactly as the panel's DT has
+# them; every one has a "-state" twin ("dsi_hs_mode" in the DT). Stock selects 88..97, 102..109
+# and 114..123; 98..101 and 110..113 (bwg-37..40, bwg-49..52) are parsed but never sent, as on
+# stock. Appended after MI_FOD_CMD_SETS' last entry by edits of their own: the tree is patched in
+# place build after build. Positional like the rest.
+MI_M1_CMD_SETS = [
+    ("DSI_CMD_SET_MI_DBI_BWG_500_1300NIT", "mi,mdss-dsi-dbi-bwg-500-1300nit-mode-command"),
+    ("DSI_CMD_SET_MI_DBI_BWG_200_500NIT",  "mi,mdss-dsi-dbi-bwg-200-500nit-mode-command"),
+    ("DSI_CMD_SET_MI_DBI_BWG_110_200NIT",  "mi,mdss-dsi-dbi-bwg-110-200nit-mode-command"),
+    ("DSI_CMD_SET_MI_DBI_BWG_80_110NIT",   "mi,mdss-dsi-dbi-bwg-80-110nit-mode-command"),
+    ("DSI_CMD_SET_MI_DBI_BWG_72_79NIT",    "mi,mdss-dsi-dbi-bwg-72-79nit-mode-command"),
+    ("DSI_CMD_SET_MI_DBI_BWG_65_72NIT",    "mi,mdss-dsi-dbi-bwg-65-72nit-mode-command"),
+    ("DSI_CMD_SET_MI_DBI_BWG_60_65NIT",    "mi,mdss-dsi-dbi-bwg-60-65nit-mode-command"),
+    ("DSI_CMD_SET_MI_DBI_BWG_53_60NIT",    "mi,mdss-dsi-dbi-bwg-53-60nit-mode-command"),
+    ("DSI_CMD_SET_MI_DBI_BWG_30_53NIT",    "mi,mdss-dsi-dbi-bwg-30-53nit-mode-command"),
+    ("DSI_CMD_SET_MI_DBI_BWG_0_30NIT",     "mi,mdss-dsi-dbi-bwg-0-30nit-mode-command"),
+] + [
+    # the temperature variants of the 0-30 nit set (stock 98..113)
+    ("DSI_CMD_SET_MI_DBI_BWG_%d" % n, "mi,mdss-dsi-dbi-bwg-%d-mode-command" % n)
+    for n in range(37, 53)
+] + [
+    ("DSI_CMD_SET_MI_SKIP_SOURCE_500_1300NIT", "mi,mdss-dsi-skip-source-500-1300nit-mode-command"),
+    ("DSI_CMD_SET_MI_SKIP_SOURCE_200_500NIT",  "mi,mdss-dsi-skip-source-200-500nit-mode-command"),
+    ("DSI_CMD_SET_MI_SKIP_SOURCE_110_200NIT",  "mi,mdss-dsi-skip-source-110-200nit-mode-command"),
+    ("DSI_CMD_SET_MI_SKIP_SOURCE_80_110NIT",   "mi,mdss-dsi-skip-source-80-110nit-mode-command"),
+    ("DSI_CMD_SET_MI_SKIP_SOURCE_72_79NIT",    "mi,mdss-dsi-skip-source-72-79nit-mode-command"),
+    ("DSI_CMD_SET_MI_SKIP_SOURCE_65_72NIT",    "mi,mdss-dsi-skip-source-65-72nit-mode-command"),
+    ("DSI_CMD_SET_MI_SKIP_SOURCE_60_65NIT",    "mi,mdss-dsi-skip-source-60-65nit-mode-command"),
+    ("DSI_CMD_SET_MI_SKIP_SOURCE_53_60NIT",    "mi,mdss-dsi-skip-source-53-60nit-mode-command"),
+    ("DSI_CMD_SET_MI_SKIP_SOURCE_30_53NIT",    "mi,mdss-dsi-skip-source-30-53nit-mode-command"),
+    ("DSI_CMD_SET_MI_SKIP_SOURCE_0_30NIT",     "mi,mdss-dsi-skip-source-0-30nit-mode-command"),
+]
+assert len(MI_M1_CMD_SETS) == 36
+_fod_last_e, _fod_last_p = MI_FOD_CMD_SETS[-1]
+
+EDITS += [
+    ("display-drivers/msm/dsi/dsi_defs.h",
+     "\t%s,\n\tDSI_CMD_SET_MAX\n" % _fod_last_e,
+     "\t%s,\n" % _fod_last_e + "".join("\t%s,\n" % e for e, _ in MI_M1_CMD_SETS)
+     + "\tDSI_CMD_SET_MAX\n"),
+    ("display-drivers/msm/dsi/dsi_panel.c",
+     '\t"%s",\n};\n\nconst char *cmd_set_state_map[DSI_CMD_SET_MAX] = {' % _fod_last_p,
+     '\t"%s",\n' % _fod_last_p + "".join('\t"%s",\n' % p for _, p in MI_M1_CMD_SETS)
+     + "};\n\nconst char *cmd_set_state_map[DSI_CMD_SET_MAX] = {"),
+    ("display-drivers/msm/dsi/dsi_panel.c",
+     '\t"%s-state",\n};\n#endif /* OPLUS_FEATURE_DISPLAY */' % _fod_last_p,
+     '\t"%s-state",\n' % _fod_last_p + "".join('\t"%s-state",\n' % p for _, p in MI_M1_CMD_SETS)
+     + "};\n#endif /* OPLUS_FEATURE_DISPLAY */"),
 ]
 
 
@@ -4425,6 +6021,37 @@ EDITS += [
      '\tpanel->power_mode = SDE_MODE_DPMS_OFF;\n'
      '\tk618_mi_disp_panel_off(panel);\t/* k618: em-cycle / qsync / HBM state back to power-on */\n'),
 ]
+
+# The 13's M3 and the 13 Ultra's M1 panels (k618_mi_disp.c)
+# Two more dsi_panel.c call sites for the 13 Ultra (k618_mi_disp.c):
+#  - dsi_panel_get_mode(), right after dsi_panel_parse_dsc_params(): its three DSC rate-control
+#    values (stock sde_dsc_populate_dsc_config 0x117bf4 takes the panel id; 6.18's does not), set
+#    before the PPS is built from the config;
+#  - dsi_panel_post_switch(), under panel_lock, before DSI_CMD_SET_POST_TIMING_SWITCH: after a
+#    switch to 1 Hz, the post-switch command's 26h/2Fh and its DBI set again (stock 0x163d68).
+EDITS += [
+    ("display-drivers/msm/dsi/dsi_panel.c",
+     "\t\trc = dsi_panel_parse_dsc_params(mode, utils);\n"
+     "\t\tif (rc) {\n"
+     "\t\t\tDSI_ERR(\"failed to parse dsc params, rc=%d\\n\", rc);\n"
+     "\t\t\tgoto parse_fail;\n"
+     "\t\t}\n",
+     "\t\trc = dsi_panel_parse_dsc_params(mode, utils);\n"
+     "\t\tif (rc) {\n"
+     "\t\t\tDSI_ERR(\"failed to parse dsc params, rc=%d\\n\", rc);\n"
+     "\t\t\tgoto parse_fail;\n"
+     "\t\t}\n"
+     "\t\tk618_mi_disp_dsc(panel, mode);\t/* k618: the 13 Ultra's DSC rate-control values */\n"),
+    ("display-drivers/msm/dsi/dsi_panel.c",
+     "\tmutex_lock(&panel->panel_lock);\n"
+     "\n"
+     "\trc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_POST_TIMING_SWITCH, false);\n",
+     "\tmutex_lock(&panel->panel_lock);\n"
+     "\n"
+     "\tk618_mi_disp_post_switch(panel);\t/* k618: the 13 Ultra's 1 Hz post-switch bytes */\n"
+     "\trc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_POST_TIMING_SWITCH, false);\n"),
+]
+
 
 WLAN_CFG80211_C = "wlan/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c"
 EDITS += [

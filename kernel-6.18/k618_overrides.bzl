@@ -45,6 +45,10 @@ k618_overrides_config = {
     # ice.c's one-time key-manager setup needs it before the first wrapped key
     "CONFIG_MSM_TMECOM_QMP": "m",
     "CONFIG_FINGERPRINT_GOODIX_FOD": "m",
+    # the 13 Ultra's camera PMIC: the MFD parent (soc-repo's) and the 5.15 regulator driver
+    # (k618_fuxi_mods.py); nothing binds them on the 13 or 13 Pro
+    "CONFIG_MFD_I2C_PMIC": "m",
+    "CONFIG_REGULATOR_QCOM_PM8008": "m",
     "CONFIG_STM_PROTO_BASIC": "m",
     # the notification light and the PWM provider it hangs off
     "CONFIG_PWM_QTI_LPG": "m",

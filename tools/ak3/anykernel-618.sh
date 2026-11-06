@@ -30,10 +30,11 @@ NO_MAGISK_CHECK=1;
 # boot install
 # The zip carries the kernel (Image) and its ramdisk (ramdisk-new.cpio.lz4, which
 # ak3-core.sh takes as the whole ramdisk, and magiskboot keeps as it is because it is already
-# compressed -- RAMDISK_COMPRESSION is forced to auto for a v4 header anyway). Both are needed:
-# the kernel does carry its own initramfs, but the bootloader also hands over the ROM's vendor
-# ramdisk, whose 328 5.15 modules would be unpacked over the built-in ones; the boot partition's
-# ramdisk is unpacked last, as it is when the image is `fastboot boot`ed.
+# compressed -- RAMDISK_COMPRESSION is forced to auto for a v4 header anyway). That ramdisk is
+# only our layer (/lib/modules, the module lists, the batch loader), which the kernel also carries
+# and unpacks after whatever the bootloader hands over -- vendor_boot's and init_boot's ramdisks,
+# or TWRP's in recovery -- so the device's own ramdisk runs, with our modules and lists in place of
+# its 5.15 ones.
 split_boot;
 
 

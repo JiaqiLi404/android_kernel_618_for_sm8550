@@ -26,7 +26,7 @@
 A=/data/adb
 P=/sys/module
 Z=/sys/module/zram/parameters
-WLB=/sys/devices/virtual/misc/boeffla_wakelock_blocker
+WLB=/sys/devices/virtual/misc/wakelock_blocker
 # the kernel's built-in list (tools/kernel-patches/wakelock_blocker.py --defaults), for switching back on
 WL_DEFAULT="qcom_rx_wakelock;IPA_CLIENT_APPS_WAN_COAL_CONS;IPA_CLIENT_APPS_WAN_LOW_LAT_CONS;IPA_CLIENT_APPS_LAN_CONS;IPA_WS;DIAG_WS;RMNET_DFC;RMNET_SHS;rmnet_ctl;rmnet_ipa%d;hal_bluetooth_lock;IPA_CLIENT_APPS_LAN_COAL_CONS;1-0008"
 

@@ -1,6 +1,6 @@
 id=nuwa_618
 name=nuwa 6.18 调优
-version=v2
-versionCode=2
+version=v3
+versionCode=3
 author=nuwa HyperOS port
 description=6.18 内核（k618）的开关：zram 分层压缩和大小、内存回收、IO、待机。默认就是内核的设置，开关在 WebUI 里

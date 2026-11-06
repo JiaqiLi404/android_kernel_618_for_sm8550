@@ -1,7 +1,9 @@
 #!/bin/bash
 # k618_qemu.sh [vendor_boot.img] [seconds, 240]: the 6.12 test boot of the phone, in QEMU instead: our
-# GKI Image with the ramdisk the bootloader would build (the ROM's vendor ramdisk, then the test
-# image's own ramdisk: Android's generic first-stage init and our /lib/modules), on QEMU's virt board.
+# GKI Image with the ramdisk the bootloader would build (the ROM's vendor ramdisk, then the stage's
+# ramdisk.lz4 in init_boot's place: Android's generic first-stage init with our /lib/modules layer
+# after it), on QEMU's virt board. A kernel with our layer built in (k618_irbuild.sh, QEMU_KERNEL)
+# unpacks it once more over all of that, as on the phone.
 # The hardware is not there, so the drivers do not probe; what shows is what does not depend on it --
 # the kernel's own start, first-stage init, and every module's load and init -- with a serial console,
 # which the phone does not have. Log in $K618/boot-test/qemu.log.
@@ -12,7 +14,8 @@ MKB=${MKB:-$NB/home/mkbootimg}
 OUT=$K618/boot-test
 mkdir -p $OUT/qemu
 python3 -I $MKB/unpack_bootimg.py --boot_img $VB --out $OUT/qemu/vb > /dev/null || exit 1
-# vendor ramdisk first, the boot image's ramdisk after it: as the bootloader concatenates them
+# vendor ramdisk first, the generic one (with our layer) after it: as the bootloader concatenates
+# vendor_boot's and init_boot's
 cat $OUT/qemu/vb/vendor_ramdisk00 $OUT/stage/ramdisk.lz4 > $OUT/qemu/initrd.img
 start=$(date +%s)
 # QEMU_SMP: CPUs (the phone has 8); QEMU_APPEND: more of the command line, e.g. what the phone's

@@ -22,16 +22,16 @@ IB=${1:-$OUT/init_boot.img}
 REL=$(cat $O/include/config/kernel.release)
 T=$OUT/stage
 [ -f "$IB" ] || { echo "no init_boot image: $IB"; exit 1; }
-# KERNEL=<Image>: another kernel than out-gki's (k618_irbuild.sh's, which carries the ramdisk itself);
-# REUSE_STAGE=1: only make the boot image again, from the stage already there
+# KERNEL=<Image>: another kernel than out-gki's (k618_irbuild.sh's, which carries our ramdisk layer
+# itself); REUSE_STAGE=1: only make the boot image again, from the stage already there
 mkimg() {
 	# (AOSP's mkbootimg imports its own gki package from next to it: not isolated); CMDLINE: the boot
 	# image's own command line (the bootloader adds it to vendor_boot's)
 	python3 $MKB/mkbootimg.py --header_version 4 --kernel ${KERNEL:-$O/arch/arm64/boot/Image} \
-		--ramdisk $T/ramdisk.lz4 --cmdline "${CMDLINE:-}" -o $OUT/boot-618.img || exit 1
+		--ramdisk $T/overlay.lz4 --cmdline "${CMDLINE:-}" -o $OUT/boot-618.img || exit 1
 }
 if [ -n "$REUSE_STAGE" ]; then
-	[ -f $T/ramdisk.lz4 ] || { echo "no stage to reuse"; exit 1; }
+	[ -f $T/overlay.lz4 ] || { echo "no stage to reuse"; exit 1; }
 	rm -f $OUT/boot-618.img
 	mkimg
 	ls -la $OUT/boot-618.img; sha256sum $OUT/boot-618.img | cut -c1-16
@@ -263,15 +263,26 @@ load += [m for m in post if m not in load]
 open(f"{rd}/modules.options", "w").write("".join(o + "\n" for o in opts))
 open(f"{rd}/modules.load", "w").write("".join(f + "\n" for f in load))
 open(f"{rd}/modules.load.recovery", "w").write("".join(f + "\n" for f in load))
+# charger mode (androidboot.mode=charger) reads this one when it is there: this phone's vendor
+# ramdisk has none, but another's may, and a 5.15 list in it would end first-stage init
+open(f"{rd}/modules.load.charger", "w").write("".join(f + "\n" for f in load))
 open(f"{out}/first-stage-missing.txt", "w").write("".join(f + "\n" for f in miss))
 print(f"first stage: {len(load)} modules of the phone's {len(load) + len(miss)}; missing: {' '.join(miss)}")
 PY
-# the ramdisk: init_boot's generic one, then our cpio, one LZ4 (legacy) stream as Android's are
+# Our layer (overlay.cpio): /lib/modules and the batch loader, nothing else. k618_irbuild.sh builds
+# it into the kernel, which unpacks it AFTER the ramdisk the bootloader hands over (k618_ports.py
+# initramfs_last), and it is the boot image's own ramdisk too (one LZ4 legacy stream, as Android's
+# are). So the phone's own vendor ramdisk and init_boot -- or TWRP's, in recovery; another model's
+# on another phone -- are what runs, and only the same-named files under /lib/modules are ours.
+# ramdisk.lz4 is for QEMU, which has no init_boot: the generic ramdisk, then our layer
+# (k618_qemu.sh puts the vendor ramdisk in front).
+(cd $T/rd && find lib ${BATCH:+k618_umh} | sort | cpio -o -H newc -R 0:0 --quiet) > $T/overlay.cpio || exit 1
+lz4 -l -12 -cq $T/overlay.cpio > $T/overlay.lz4 || exit 1
 python3 -I $MKB/unpack_bootimg.py --boot_img $IB --out $T/ib > /dev/null || exit 1
 lz4 -dcq $T/ib/ramdisk > $T/ramdisk.cpio || exit 1
-(cd $T/rd && find lib ${BATCH:+k618_umh} | sort | cpio -o -H newc -R 0:0 --quiet) >> $T/ramdisk.cpio || exit 1
+cat $T/overlay.cpio >> $T/ramdisk.cpio || exit 1
 lz4 -l -12 -cq $T/ramdisk.cpio > $T/ramdisk.lz4 || exit 1
 mkimg
 ls $T/rd/lib/modules/*.ko | xargs -n1 basename > $OUT/modules.txt
-echo "kernel $REL, $(wc -l < $OUT/modules.txt) modules, ramdisk $(stat -c %s $T/ramdisk.lz4) bytes"
+echo "kernel $REL, $(wc -l < $OUT/modules.txt) modules, our ramdisk layer $(stat -c %s $T/overlay.lz4) bytes"
 ls -la $OUT/boot-618.img; sha256sum $OUT/boot-618.img | cut -c1-16

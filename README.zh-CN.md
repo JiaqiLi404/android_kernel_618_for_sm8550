@@ -4,23 +4,25 @@
 
 [English](README.md)
 
-[下载内核包](https://github.com/JiaqiLi404/android_kernel_618_for_sm8550/releases/tag/v6.18.32-nuwa.1) · 预发布，真机验证待完成。
+[下载内核包](https://github.com/JiaqiLi404/android_kernel_618_for_sm8550/releases/tag/v6.18.32-nuwa.1) · 预发布，真机验证待完成。这些安装包早于“模块层 ramdisk”和 13 / 13 Ultra 驱动，需要它们时请从源码构建。
 
-目标设备：**小米 13 Pro / nuwa**。配套环境：**NikoHyper / HyperOS 4，OS4.0.24.0.XEOCNXM**。其他机型或 ROM / vendor 组合需单独适配。
+目标设备：**小米 13 Pro / nuwa**（主要目标）。已包含 **小米 13 / fuxi** 与 **小米 13 Ultra / ishtar** 的驱动适配（触摸、屏幕面板调校与 DC 调光、相机 PHY 与 OIS、PM8008 相机电源、ToF 测距、充电节点），但尚未在这两台手机上运行过。配套环境：**NikoHyper / HyperOS 4，OS4.0.24.0.XEOCNXM**。其他 ROM / vendor 组合需单独适配。
 
 ## 我们做了什么
 
 | 工作 | 对使用者的价值 | 来源与实现 |
 |:--|:--|:--|
 | **6.18 内核移植到 SM8550** | 将较新内核与设备需要的时钟、UFS、USB、互联和电源驱动接起来 | 一加驱动基础 + MiCode 设备定义；[驱动来源](docs/PROVENANCE.zh-CN.md#drivers) |
-| **补齐设备与多媒体支持** | 适配显示 / 合成器、相机、视频、DSP、触摸 / 手势及音频接口 | 组合 SM8850、SM8550 和小米公开源码，处理 6.18 API / ABI 差异；[来源与适配](docs/PROVENANCE.zh-CN.md#drivers) |
-| **匹配内核、模块和引导镜像** | 统一生成 401 模块 payload、ramdisk、boot.img 与 AnyKernel3 安装包 | 官方 OTA 中的 54 个小米模块 + 源码重编模块；[固件来源](docs/PROVENANCE.zh-CN.md#firmware) |
+| **补齐设备与多媒体支持** | 适配显示 / 合成器、相机、视频、DSP、触摸 / 手势及音频接口，含 13 / 13 Ultra 的差异 | 组合 SM8850、SM8550 和小米公开源码，处理 6.18 API / ABI 差异；[来源与适配](docs/PROVENANCE.zh-CN.md#drivers) |
+| **匹配内核、模块和引导镜像** | 统一生成模块 payload（404 个模块）、模块层 ramdisk、boot.img 与 AnyKernel3 安装包 | 官方 OTA 中的 54 个小米模块 + 源码重编模块；[固件来源](docs/PROVENANCE.zh-CN.md#firmware) |
 | **内存、调度与功耗改动** | 提供回收、LZ4 1.10.1 / ZSTD 分层压缩、空闲路径与唤醒控制 | 逐项列出上游来源和本项目适配；[22 项改动](docs/PROVENANCE.zh-CN.md#improvements) |
 | **可重建与可检查** | 固定依赖版本、自动获取输入、检查 ABI 和安装包；WSL 构建限制内存为 12 GiB | [依赖获取](docs/PROVENANCE.zh-CN.md#acquire) → [构建](docs/BUILD.zh-CN.md) → [验证](docs/VALIDATION.zh-CN.md) |
 
 项目的核心是将这些来源组合并适配到同一套设备接口与模块 ABI。性能、功耗及全部硬件功能仍需在目标手机验证，详见[验证范围](docs/VALIDATION.zh-CN.md#scope)。
 
 ## 关键改进的原理
+
+**沿用设备自己的启动盘。** 内核只内置本项目的模块层（`/lib/modules`、加载清单和批量加载器），并在 bootloader 交来的 ramdisk 之后解包。设备自己的 vendor_boot / init_boot ramdisk，或 recovery / TWRP 的 ramdisk 照常运行，只有同名模块文件和清单被替换。[来源与实现](docs/PROVENANCE.zh-CN.md#drivers)
 
 **LZ4：上游 1.10.1。** 用上游 C 实现更新内核原有的 1.8.3 解压代码，覆盖 EROFS 文件读取与 zram 等调用路径。arm64 的 64 字节超前拷贝会超过 EROFS 原地解压预留的余量，这里保留 32 字节路径，并处理内核接口与模块 ABI 兼容。[来源与实现](docs/PROVENANCE.zh-CN.md#improvements)
 

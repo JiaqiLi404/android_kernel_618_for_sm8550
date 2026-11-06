@@ -48,7 +48,7 @@ directory = Path(sys.argv[1])
 report = {
     'status': 'passed',
     'scenarios': ['Horizon / slot A', 'recovery / slot B'],
-    'checks': ['kernel payload', 'complete ramdisk', 'exact command line', 'header fields', 'inactive slot unchanged'],
+    'checks': ['kernel payload', 'module-layer ramdisk', 'exact command line', 'header fields', 'inactive slot unchanged'],
     'fixture_partition_bytes': 128 * 1024 * 1024,
     'installer_zip_sha256': hashlib.sha256((directory / 'nuwa-kernel-6.18-AnyKernel3.zip').read_bytes()).hexdigest(),
     'environment': 'isolated PID/mount namespaces, temporary loop images, pinned QEMU 8.2.2',

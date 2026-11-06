@@ -87,6 +87,11 @@ def checkout(item):
         git(path, 'sparse-checkout', 'init', '--no-cone')
         run(['git', '-C', path, 'sparse-checkout', 'set', '--no-cone', '--stdin'],
             input='\n'.join(item['sparse'])+'\n', text=True)
+    if item.get('patch') and (path / '.git').is_dir():
+        # A reconstructed tree that an earlier build edited in place: the build re-applies its
+        # edits from a clean checkout every time, so local changes are discarded before switching.
+        git(path, 'reset', '-q', '--hard')
+        git(path, 'clean', '-fdq')
     git(path, '-c', 'advice.detachedHead=false', 'checkout', '-q', '--detach', item['revision'])
     if item.get('patch'):
         record = json.loads((PROJECT / 'provenance/soc-baseline.json').read_text())
@@ -224,8 +229,9 @@ def verify():
         raise RuntimeError('QEMU package hash mismatch')
     report['status'] = 'passed'
     (ROOT/'input-validation.json').write_text(json.dumps(report, indent=2)+'\n')
-    print('INPUT VALIDATION PASSED: 14 repositories, 2 vendor refs, 6 partitions, '
-          +str(report['xiaomi_modules'])+' pinned Xiaomi modules', flush=True)
+    print(f'INPUT VALIDATION PASSED: {len(report["repositories"])} repositories, '
+          f'{len(SPEC["vendor_cache"])} vendor refs, {len(report["partitions"])} partitions, '
+          f'{report["xiaomi_modules"]} pinned Xiaomi modules', flush=True)
 
 
 def main():

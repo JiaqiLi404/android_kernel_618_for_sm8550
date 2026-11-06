@@ -36,6 +36,9 @@ python3 -I $KD/k618_touch_fix.py $D || exit 1
 
 python3 -I $KD/k618_touch_gesture.py $D || exit 1
 if [ "${THP:-1}" != 0 ]; then python3 -I $KD/drafts/k618_touch_thp.py $D || exit 1; fi
+# the 13 and the 13 Ultra: THP as each node says (in k618_touch_thp.py), the 13 Ultra's second
+# interrupt pin chosen by board id as its stock driver does
+python3 -I $KD/k618_touch_devices.py $D || exit 1
 cat > $D/Kbuild <<'EOF'
 obj-m += xiaomi/ fts_spi/
 EOF

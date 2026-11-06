@@ -35,15 +35,17 @@ Expect **`RUNTIME VALIDATION PASSED`**. See `logs/<tag>/runtime-test.log` and `d
 
 ## 2 · Verified project scope
 
+The table records the last complete run (bootstrap, build, `verify` and the QEMU runtime test). The row marked † was not re-run for the current tree: the host's 32-bit ARM user-mode emulator hangs before the installer's first command.
+
 | Check | Result |
 |:--|:--|
-| Independent upstream reconstruction | **Passed**: 14 repositories, two vendor refs, six partitions and 54 module hashes; [record](../provenance/input-validation.json) |
-| Source compilation | **Passed**: GKI, 247/247 SoC modules, 30/30 Techpack groups, RPC/EVA, touch/THP and CS35L41 |
-| Final modules and ABI | **401 modules, 20,969 versioned kernel imports**; no CRC mismatches or unresolved depmod errors |
-| Embedded-initramfs kernel | 18,008 vmlinux export CRCs match the base GKI |
+| Independent upstream reconstruction | **Passed**: 15 repositories, two vendor refs, six partitions and 54 module hashes ([record](../provenance/input-validation.json)) |
+| Source compilation | **Passed**: GKI, 249/249 SoC modules, 30/30 Techpack groups, RPC/EVA, touch/THP, CS35L41 and the ToF module |
+| Final modules and ABI | **404 modules, 21,107 versioned kernel imports**; no CRC mismatches or unresolved depmod errors |
+| Embedded-initramfs kernel | 18,008 vmlinux export CRCs match the base GKI; the built-in layer equals the boot ramdisk (416 entries, module layer only) and INITRAMFS_FORCE is off |
 | boot/AnyKernel3 consistency | Kernel, compressed ramdisk and all 17 command-line entries/order match; ZIP and required-list checks pass |
-| Installer emulation | Horizon/slot A and recovery/slot B pass; inactive slot unchanged |
-| Kernel runtime in QEMU | tmpfs xattrs, deferrable KFENCE, lazy RCU and 8 KiB trace setting pass; 1,024 zram pages survive two recompression rounds; 24-byte candidate cache is released on unload |
+| Installer emulation † | Previous tree: Horizon/slot A and recovery/slot B pass; inactive slot unchanged. Not re-run (see above); the installer script itself is unchanged apart from its command-line list, which the packer checks against the image |
+| Kernel runtime in QEMU | tmpfs xattrs, deferrable KFENCE, lazy RCU and the 8 KiB trace setting pass; 1,024 zram pages survive two recompression rounds; the 24-byte candidate cache is released on unload |
 | TCP configuration | BBR/CUBIC and fq/fq_codel built in; CUBIC default; official mibbr in module load list |
 | Setting recovery logic | dash, bash and ARM BusyBox checks cover trial expiry, panic rollback, boot-only trials and preserved choices across normal reboot/kernel changes |
 | Resource limits | Effective cgroup values confirm 12/10/1 GiB and four CPU cores |
@@ -63,10 +65,11 @@ adb shell cat /sys/block/zram0/recomp_algorithm
 adb shell cat /sys/block/zram0/disksize
 adb shell cat /proc/sys/net/ipv4/tcp_available_congestion_control
 adb shell cat /proc/sys/net/ipv4/tcp_congestion_control
+adb shell cat /sys/module/k618_probe/parameters/in_recovery
 ```
 
-Defaults should be **6.18.32, LZ4 primary compression, ZSTD recompression and 16 GiB zram**. Check touch/gestures, display, calls/mobile data, Wi-Fi, audio, every camera, fingerprint/face unlock, and unplugged screen-off suspend.
+Defaults should be **6.18.32, LZ4 primary compression, ZSTD recompression and 16 GiB zram**, and `in_recovery` reads `N`; in a recovery such as TWRP it reads `Y` and the recovery's own interface starts. Check touch/gestures, display, AOD exit by fingerprint, calls/mobile data, Wi-Fi, audio, every camera, fingerprint/face unlock, and unplugged screen-off suspend.
 
 <a id="scope"></a>
 
-Source compilation, static checks, QEMU kernel checks and installer emulation on synthetic partitions pass. Real hardware modes, ROM compatibility, thermals, standby and power use still require phone testing. The 128 MiB emulation fixtures do not establish the phone's physical partition size.
+Source compilation, static checks, QEMU kernel checks and installer emulation on synthetic partitions pass. Real hardware modes, ROM compatibility, thermals, standby and power use still require phone testing; the 13 / 13 Ultra adaptations have not been run on those phones. The 128 MiB emulation fixtures do not establish the phone's physical partition size.

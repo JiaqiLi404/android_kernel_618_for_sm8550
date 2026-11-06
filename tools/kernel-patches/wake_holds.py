@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Configure untimed wakelock and alarm wake holds. Community optimization concepts are exposed through bounded runtime parameters. See docs/PROVENANCE.en.md for attribution and behavior."""
+"""Configure untimed wakelock and alarm wake holds (this project's policy) as bounded, reversible
+runtime parameters: wakelock.untimed_ms and alarmtimer.short_hold. See docs/PROVENANCE.en.md.
+
+Usage: wake_holds.py <kernel-common-dir> [1 (default: 500 ms, Y) | 0 (both as upstream)]
+"""
 
 import re
 import sys

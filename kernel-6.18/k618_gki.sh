@@ -190,6 +190,7 @@ $W/common/scripts/config --file $O/.config -d ZRAM_DEF_COMP_LZORLE -e ZRAM_DEF_C
 $W/common/scripts/config --file $O/.config -e KFENCE_DEFERRABLE -e TMPFS_XATTR
 $M olddefconfig >> $O/../gki-config.log 2>&1
 grep -q '^CONFIG_ZRAM_DEF_COMP="lz4"' $O/.config || echo "k618_gki: CONFIG_ZRAM_DEF_COMP is not lz4"
+for c in KFENCE_DEFERRABLE TMPFS_XATTR; do grep -q "^CONFIG_$c=y" $O/.config || echo "k618_gki: CONFIG_$c did not take"; done
 grep -q '^# CONFIG_STATIC_USERMODEHELPER is not set' $O/.config || echo "k618_gki: STATIC_USERMODEHELPER did not take"
 for c in $GKI_MODS; do grep -q "^CONFIG_$c=m" $O/.config || echo "k618_gki: CONFIG_$c did not take"; done
 grep -q '^CONFIG_KSU=y' $O/.config || echo "k618_gki: CONFIG_KSU did not take"

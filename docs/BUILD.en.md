@@ -14,9 +14,9 @@ The entry compiles GKI, SoC, Techpack and device modules, generates matching ram
 
 | Output | Purpose |
 |:--|:--|
-| `dist/release/boot.img` | Complete kernel and matching ramdisk for fastboot |
+| `dist/release/boot.img` | Kernel with the module layer built in, and the same layer as its ramdisk, for fastboot |
 | `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` | Kernel installer for a compatible flashing tool/recovery |
-| `dist/release/nuwa-618-v2.zip` | Optional KernelSU module to control kernel settings |
+| `dist/release/nuwa-618-v3.zip` | Optional KernelSU module to control kernel settings |
 | `dist/release/validation.json`, `SHA256SUMS` | Validation result and artifact hashes |
 | `logs/release/build.log` | Build log; investigate the first error if a stage fails |
 
@@ -24,7 +24,7 @@ After `BUILD AND PACKAGE VALIDATION PASSED`, follow [VALIDATION](VALIDATION.en.m
 
 ## 2 · Identify the phone and back up boot
 
-Use only **Xiaomi 13 Pro / nuwa** with the ROM specified on the home page. The bootloader must be unlocked. Install Android platform-tools on the host and enable USB debugging. AnyKernel3 device checks are disabled, so check before installation:
+The main target is the **Xiaomi 13 Pro / nuwa** with the ROM specified on the home page. The 13 / fuxi and 13 Ultra / ishtar adaptations have not been run on those phones yet; use only temporary boot on them until they are tested. The bootloader must be unlocked. Install Android platform-tools on the host and enable USB debugging. AnyKernel3 device checks are disabled, so check before installation:
 
 ```bash
 adb shell getprop ro.product.device
@@ -64,7 +64,7 @@ Temporary boot does not flash boot; Android still writes user data and this kern
 | Horizon Kernel Flasher / compatible recovery | Install `dist/release/nuwa-kernel-6.18-AnyKernel3.zip` |
 | Bootloader fastboot | Confirm the active slot, run `fastboot flash boot dist/release/boot.img`, then `fastboot reboot` |
 
-Keep the kernel, ramdisk and modules matched; retain the replacement ramdisk inside the AnyKernel3 ZIP. Install the optional `nuwa-618-v2.zip` separately through KernelSU's module interface.
+Keep the kernel, ramdisk and modules matched; retain the replacement ramdisk inside the AnyKernel3 ZIP. The vendor_boot/init_boot ramdisk, or the recovery ramdisk (for example TWRP), still runs with this kernel; only the module files and lists come from the module layer. Install the optional `nuwa-618-v3.zip` separately through KernelSU's module interface.
 
 ## 4 · Rollback and troubleshooting
 

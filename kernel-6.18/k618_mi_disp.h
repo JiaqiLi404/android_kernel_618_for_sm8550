@@ -7,6 +7,7 @@
 #define _MI_DISP_K618_H_
 
 struct dsi_display;
+struct dsi_display_mode;
 struct dsi_panel;
 
 /* create the char device + class + sysfs once; safe to call more than once */
@@ -25,7 +26,7 @@ void k618_mi_disp_bl(struct dsi_panel *panel, u32 bl_lvl);
 /* generic event injection (disp_id, event type, payload length, payload as a u64) */
 void k618_mi_disp_event(int disp_id, u32 type, u32 len, u64 val);
 
-/* Device compatibility. */
+/* the brightness chain as the phone's 5.15 msm_drm runs it (k618_mi_disp.c) */
 /* dsi_panel_set_backlight(), DCS, before the 51h write: em-cycle switch + dead zone; false = skip 51h */
 bool k618_mi_disp_bl_pre(struct dsi_panel *panel, u32 *bl_lvl);
 /* dsi_panel_switch(), before DSI_CMD_SET_TIMING_SWITCH: em bytes of the new mode for the current level */
@@ -37,7 +38,13 @@ void k618_mi_disp_pre_nolp(struct dsi_panel *panel);
 void k618_mi_disp_post_nolp(struct dsi_panel *panel, int rc);
 /* dsi_panel_disable(), after the panel is marked off */
 void k618_mi_disp_panel_off(struct dsi_panel *panel);
-/* Device compatibility. */
+/* dsi_panel_set_lp1/lp2(), after the command, panel_lock held: AOD entered */
 void k618_mi_disp_post_lp(struct dsi_panel *panel, int rc);
+
+/* the 13 (M3) and 13 Ultra (M1) panels */
+/* dsi_panel_get_mode(), after dsi_panel_parse_dsc_params(): the 13 Ultra's DSC rate-control values */
+void k618_mi_disp_dsc(struct dsi_panel *panel, struct dsi_display_mode *mode);
+/* dsi_panel_post_switch(), panel_lock held, before DSI_CMD_SET_POST_TIMING_SWITCH */
+void k618_mi_disp_post_switch(struct dsi_panel *panel);
 
 #endif /* _MI_DISP_K618_H_ */

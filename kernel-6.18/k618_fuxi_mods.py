@@ -76,6 +76,13 @@ MODS = [
     # 6.12's coresight core no longer has (every device is now a source, link, sink or helper)
     ("goodix_fod", "CONFIG_FINGERPRINT_GOODIX_FOD", "drivers/input/fingerprint/goodix_fod",
      ["gf_spi.c", "gf_spi.h", "platform.c", "netlink.c"], []),
+    # the 13 Ultra's camera PMIC PM8008 on I2C, in the 5.15 binding its DT uses
+    # (qcom,pm8008-chip / qcom,pm8008-regulator under a qcom,i2c-pmic node). soc-repo's own PM8008
+    # drivers are the upstream ones with the new binding; its qcom-i2c-pmic (the MFD parent) is
+    # registered already and only needs MFD_I2C_PMIC. The 13 Ultra's vendor_dlkm loads exactly
+    # these two (qcom-i2c-pmic.ko, qcom_pm8008-regulator.ko); the 13 and 13 Pro have no PM8008.
+    ("qcom_pm8008-regulator", "CONFIG_REGULATOR_QCOM_PM8008", "drivers/regulator",
+     ["qcom_pm8008-regulator.c"], ["drivers/regulator/debug-regulator"]),	# as stock's depends
     # NOT imported: qcom_ipc_lite -- soc-repo has no Kconfig under drivers/media/platform/msm/synx,
     # so CONFIG_MSM_GLOBAL_SYNX cannot be given one that Kconfig would read
     # NOT imported: ipa_fmwk (the 5.15 IPA framework shim). Its header pulls in the whole 5.15 IPA
@@ -115,6 +122,7 @@ VOID_REMOVE = [
     ("drivers/thermal/qcom/sdpm_clk.c", "sdpm_clk_device_remove"),
     ("drivers/thermal/qcom/policy_engine.c", "pe_sens_device_remove"),
     ("drivers/input/fingerprint/goodix_fod/gf_spi.c", "gf_remove"),
+    ("drivers/regulator/qcom_pm8008-regulator.c", "pm8008_chip_remove"),
     ("drivers/soc/qcom/core_hang_detect.c", "msm_hang_detect_remove"),
     ("drivers/spmi/spmi-glink-debug.c", "spmi_glink_remove"),
     ("drivers/soc/qcom/qbt_handler.c", "qbt_remove"),

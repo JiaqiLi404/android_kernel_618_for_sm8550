@@ -317,6 +317,14 @@ FILE_EDITS = [
      re.compile(r"/\*\*\n \* ufshcd_dme_rmw - .*?\n}\n\n", re.S), ""),
     ("drivers/usb/typec/ucsi/ucsi_qti_glink.c",
      re.compile(r"\.sync_control = ucsi_qti_sync_control,"), ".sync_control = ucsi_qti_sync_control_618,"),
+    # 6.18.32: dwc3_ep has no regs any more; DWC3_DEPCMDPAR0-2 and DWC3_DEPCMD take the endpoint
+    # number and carry DWC3_DEP_BASE themselves. The same addresses: dep->regs was
+    # dwc->regs + DWC3_DEP_BASE(dep->number)
+    ("drivers/usb/dwc3/dwc3-msm-core.c",
+     re.compile(r"dwc3_msm_ep_(writel|readl)\(dep->regs, (DWC3_DEPCMDPAR[0-2]|DWC3_DEPCMD)([,)])"),
+     r"dwc3_msm_ep_\1(dep->dwc->regs, \2(dep->number)\3"),
+    ("drivers/usb/dwc3/dwc3-msm-core.c",
+     re.compile(r"DWC3_DEP_BASE\(dep->number\) \+ DWC3_DEPCMD\)"), "DWC3_DEPCMD(dep->number))"),
 ]
 
 IOMMU_PAGE = """/* 6.18's iommu-pages: zeroed memory by its address, the size in bytes */

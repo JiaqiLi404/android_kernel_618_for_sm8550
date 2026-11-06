@@ -1060,6 +1060,62 @@ static void zram_bio_discard(""", 1),
 ])
 
 
+# ---- initramfs_last: the order in which the kernel unpacks its ramdisks. `fastboot boot` takes
+# init_boot's ramdisk instead of the image's, so the kernel carries our module layer itself
+# (k618_irbuild.sh). The recovery partition of this phone holds an image with no kernel
+# (kernel_size 0): recovery is the boot partition's kernel with the recovery ramdisk (the ROM's or
+# TWRP's), and another model brings its own fstab and init in its own ramdisks. So the bootloader's
+# ramdisk is unpacked first and the built-in one -- our 6.18 modules and their lists, nothing else
+# -- over it: ours win where both have a file (modules.load, modules.load.recovery, same-named .ko)
+# and the rest is the device's own.
+change("initramfs_last", [
+    ("init/initramfs.c", """static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
+{
+	/* Load the built in initramfs */
+	char *err = unpack_to_rootfs(__initramfs_start, __initramfs_size);
+	if (err)
+		panic_show_mem("%s", err); /* Failed to decompress INTERNAL initramfs */
+
+	if (!initrd_start || IS_ENABLED(CONFIG_INITRAMFS_FORCE))
+		goto done;
+""",
+     """static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
+{
+	char *err;
+
+	/*
+	 * k618 initramfs_last: the built-in initramfs goes on after the ramdisk the bootloader passes
+	 * (the device's own vendor_boot and init_boot: its fstab, its init, its recovery), so that
+	 * what it carries -- our modules and their lists -- wins where both have a file. With no
+	 * ramdisk passed, or with INITRAMFS_FORCE, it is the only one.
+	 */
+	if (!initrd_start || IS_ENABLED(CONFIG_INITRAMFS_FORCE)) {
+		err = unpack_to_rootfs(__initramfs_start, __initramfs_size);
+		if (err)
+			panic_show_mem("%s", err); /* Failed to decompress INTERNAL initramfs */
+		goto done;
+	}
+""", 1),
+    ("init/initramfs.c", """		printk(KERN_EMERG "Initramfs unpacking failed: %s\\n", err);
+#endif
+	}
+
+done:
+""",
+     """		printk(KERN_EMERG "Initramfs unpacking failed: %s\\n", err);
+#endif
+	}
+
+	/* k618 initramfs_last: and the built-in one over it */
+	err = unpack_to_rootfs(__initramfs_start, __initramfs_size);
+	if (err)
+		panic_show_mem("%s", err); /* Failed to decompress INTERNAL initramfs */
+
+done:
+""", 1),
+])
+
+
 def done(t, old, new):
     """an insertion keeps its old text (new contains it); a removal's new text is part of its old one"""
     if old in new:

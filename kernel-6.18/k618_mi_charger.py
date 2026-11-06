@@ -171,7 +171,17 @@ XM_STOCK = [
 
 
 def xm_enum_text():
-    out = ['/* Device compatibility. */\n',
+    out = ["/*\n"
+           " * k618: XM property ids in THIS ROM's ADSP charger firmware numbering (OS4.0.24.0 vendor),\n"
+           " * read off the phone's own 5.15 qti_battery_charger.ko attribute by attribute. fuxi's\n"
+           " * Android-T list is the same list with entries inserted, so every id past XM_PROP_REAL_TYPE\n"
+           " * moved -- with fuxi's ids fg_vendor reads FG1_FCC (139) and indexes an 8-entry table with\n"
+           " * it. Explicit numbers, keyed by name, never by position:\n"
+           " *   v = an immediate in the stock module's code for this name;\n"
+           " *   p = position only (fills a gap exactly as wide as fuxi's run there; nothing here\n"
+           " *       sends it). Ids 83-87, 90-93, 165, 167-216 and 218 are unused by stock code.\n"
+           " * XM_PROP_MAX is the stock prop_count: replies with an id >= it are dropped.\n"
+           " */\n",
            "enum xm_property_id {\n"]
     for name, val, how in XM_STOCK:
         tag = "" if name == "XM_PROP_MAX" else f"\t/* {how} */"
@@ -303,7 +313,10 @@ B_EDITS = [
 	rc = read_property_id(bcdev, pst, XM_PROP_FG_VENDOR_ID);
 	if (rc < 0)
 		return rc;
-	/* Device compatibility. */
+	/*
+	 * k618: the number, as the stock module prints it (\"%d\\n\"; 5.15 shows 2). fuxi indexed
+	 * POWER_SUPPLY_VENDOR_TEXT with it (a UBSAN bounds trap). The name is pack_vendor_str.
+	 */
 	return scnprintf(buf, PAGE_SIZE, \"%d\\n\", pst->prop[XM_PROP_FG_VENDOR_ID]);
 """),
 
@@ -376,7 +389,7 @@ B_EDITS = [
 ]
 
 NEW_CODE = r'''/*
- * k618: what the stock 5.15 module has besides fuxi's attributes (charger/xm_ids.md).
+ * k618: what the stock 5.15 module has besides fuxi's attributes.
  */
 
 /* B6: the "battery" cooling device -- 16 levels, the level number itself goes to the firmware */
@@ -592,8 +605,79 @@ static CLASS_ATTR_RO(pack_vendor_str);
 
 '''
 
+# ------------------------------------------------------------------------------------------------
+# The 13 Ultra's own nodes. Its stock qti_battery_charger.ko (ishtar OS3.0.308.0.WMACNXM, read the
+# same way as this phone's, function by function) sends the same id as this phone's for every node
+# both have, and the 13's (fuxi OS3.0.309.0.WMCCNXM) is this phone's exactly. The 13 Ultra adds the
+# NVT fuel gauge's learning nodes on 116-136 -- the enum positions above that were "p" (position
+# only) here, now confirmed by its code -- and has_dp on 218. Each is a plain get (and set):
+# "%d" and kstrtoint, as its stock functions. Nothing on the 13 or 13 Pro reads them.
+# ------------------------------------------------------------------------------------------------
+K618_ULTRA_NODES = [
+    # (node, id, writable)
+    ("over_peak_flag", "XM_PROP_OVER_PEAK_FLAG", False),
+    ("current_deviation", "XM_PROP_CURRENT_DEVIATION", False),
+    ("power_deviation", "XM_PROP_POWER_DEVIATION", False),
+    ("average_current", "XM_PROP_AVERAGE_CURRENT", False),
+    ("average_temp", "XM_PROP_AVERAGE_TEMPERATURE", False),
+    ("start_learn", "XM_PROP_START_LEARNING", True),
+    ("stop_learn", "XM_PROP_STOP_LEARNING", True),
+    ("set_learn_power", "XM_PROP_SET_LEARNING_POWER", True),
+    ("get_learn_power", "XM_PROP_GET_LEARNING_POWER", False),
+    ("get_learn_power_dev", "XM_PROP_GET_LEARNING_POWER_DEV", False),
+    ("get_learn_time_dev", "XM_PROP_GET_LEARNING_TIME_DEV", False),
+    ("constant_power", "XM_PROP_SET_CONSTANT_POWER", True),
+    ("remaining_time", "XM_PROP_GET_REMAINING_TIME", False),
+    ("referance_power", "XM_PROP_SET_REFERANCE_POWER", True),
+    ("nvt_referance_current", "XM_PROP_GET_REFERANCE_CURRENT", False),
+    ("nvt_referance_power", "XM_PROP_GET_REFERANCE_POWER", False),
+    ("start_learn_b", "XM_PROP_START_LEARNING_B", True),
+    ("stop_learn_b", "XM_PROP_STOP_LEARNING_B", True),
+    ("set_learn_power_b", "XM_PROP_SET_LEARNING_POWER_B", True),
+    ("get_learn_power_b", "XM_PROP_GET_LEARNING_POWER_B", False),
+    ("get_learn_power_dev_b", "XM_PROP_GET_LEARNING_POWER_DEV_B", False),
+    ("has_dp", "K618_XM_PROP_HAS_DP", False),
+]
+
+
+def ultra_node(name, pid, rw):
+    s = (f"static ssize_t {name}_show(struct class *c,\n"
+         "\t\t\tstruct class_attribute *attr, char *buf)\n"
+         "{\n"
+         "\tstruct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,\n"
+         "\t\t\t\t\t\tbattery_class);\n"
+         "\tstruct psy_state *pst = &bcdev->psy_list[PSY_TYPE_XM];\n"
+         "\tint rc;\n\n"
+         f"\trc = read_property_id(bcdev, pst, {pid});\n"
+         "\tif (rc < 0)\n\t\treturn rc;\n\n"
+         f"\treturn scnprintf(buf, PAGE_SIZE, \"%d\\n\", pst->prop[{pid}]);\n"
+         "}\n")
+    if rw:
+        s += (f"\nstatic ssize_t {name}_store(struct class *c,\n"
+              "\t\t\tstruct class_attribute *attr, const char *buf, size_t count)\n"
+              "{\n"
+              "\tstruct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,\n"
+              "\t\t\t\t\t\tbattery_class);\n"
+              "\tint rc, val;\n\n"
+              "\tif (kstrtoint(buf, 10, &val))\t/* decimal, as the 13 Ultra's source */\n\t\treturn -EINVAL;\n"
+              f"\trc = write_property_id(bcdev, &bcdev->psy_list[PSY_TYPE_XM], {pid}, val);\n"
+              "\tif (rc < 0)\n\t\treturn rc;\n\n"
+              "\treturn count;\n"
+              "}\n")
+    return s + f"static CLASS_ATTR_{'RW' if rw else 'RO'}({name});\n\n"
+
+
+NEW_CODE += ("/* k618: the 13 Ultra's NVT fuel gauge nodes and has_dp (its stock ids) */\n"
+             "#define K618_XM_PROP_HAS_DP\t218\n\n"
+             + "".join(ultra_node(*n) for n in K618_ULTRA_NODES))
+
 # fill the placeholder: the new code goes right before the attribute list
 B_EDITS = [(o, n if n is not None else NEW_CODE + o) for (o, n) in B_EDITS]
+B_EDITS.append(("\t&class_attr_pack_vendor_str.attr,\n\tNULL,\n",
+                "\t&class_attr_pack_vendor_str.attr,\n"
+                "\t/* k618: the 13 Ultra's */\n"
+                + "".join(f"\t&class_attr_{n}.attr,\n" for n, _, _ in K618_ULTRA_NODES)
+                + "\tNULL,\n"))
 
 # --mi-thermal: the unit k618_mi_thermal.c hands over (stock divides by 100)
 MI_THERMAL_EDITS = [

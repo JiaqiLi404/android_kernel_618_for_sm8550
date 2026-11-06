@@ -25,6 +25,10 @@
       "revision": "7d10d738b2c4299f3b8549c61a01ece39f19c788"
     },
     {
+      "name": "MiCode 13 Ultra ToF",
+      "revision": "16c625d2e63c5c38370f00fdff5e44be217ff6d5"
+    },
+    {
       "name": "kernel/prebuilts/build-tools",
       "revision": "78af2daf5d9d36fc6e1ddb28ee0d7b6516709eb4"
     },

@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Implement the Boeffla wakelock-blocker interface using RCU-managed lists. Interface origin: andip71; select the built-in list with --defaults. See docs/PROVENANCE.en.md."""
+"""Wakelock blocker: wakeup sources named in a list never keep the system awake.
+
+Usage: wakelock_blocker.py <kernel-common-dir> <default list, e.g. "a;b"> | --defaults
+
+Adds the blocker to drivers/base/power/wakeup.c. Its sysfs directory is
+/sys/devices/virtual/misc/wakelock_blocker: wakelock_blocker (user list), wakelock_blocker_default
+(built-in list, writable), debug and version; names are separated by ';'. Both lists are parsed
+when written and swapped under RCU; the check reads a 64-bit filter of first characters and then
+compares names. --defaults selects DEFAULT_LIST. Idempotent; a re-run only changes the default list.
+"""
 
 import sys
 
@@ -9,12 +18,11 @@ DEFAULT_LIST = (
 )
 
 BLOCK = r"""/*
- * Wakelock blocker (the interface of andip71's Boeffla wakelock blocker): wakeup sources named
- * in the default or the user list never keep the system awake.
- * /sys/devices/virtual/misc/boeffla_wakelock_blocker/{wakelock_blocker,wakelock_blocker_default,
+ * Wakelock blocker: wakeup sources named in the default or the user list never keep the system
+ * awake. /sys/devices/virtual/misc/wakelock_blocker/{wakelock_blocker,wakelock_blocker_default,
  * debug,version}; names separated by ';'.
  */
-#define WL_BLOCKER_VERSION	"1.1.0"
+#define WL_BLOCKER_VERSION	"1.0.0"
 #define WL_BLOCKER_LEN		1024
 #define WL_BLOCKER_NAME		61	/* a longer name is never blocked */
 
@@ -52,7 +60,7 @@ static bool wl_blocker_check(struct wakeup_source *ws)
 	unsigned int i;
 
 	if (unlikely(wl_blocker_debug))
-		pr_info("Boeffla WL blocker: %s requested\n", name);
+		pr_info("WL blocker: %s requested\n", name);
 	if (!name || !name[0])
 		return false;
 	rcu_read_lock();
@@ -64,11 +72,11 @@ static bool wl_blocker_check(struct wakeup_source *ws)
 	if (!blocked)
 		return false;
 	if (unlikely(wl_blocker_debug))
-		pr_info("Boeffla WL blocker: %s blocked\n", ws->name);
+		pr_info("WL blocker: %s blocked\n", ws->name);
 	if (ws->active) {
 		wakeup_source_deactivate(ws);
 		if (unlikely(wl_blocker_debug))
-			pr_info("Boeffla WL blocker: %s killed\n", ws->name);
+			pr_info("WL blocker: %s killed\n", ws->name);
 	}
 	return true;
 }
@@ -201,7 +209,7 @@ ATTRIBUTE_GROUPS(wl_blocker);
 
 static struct miscdevice wl_blocker_device = {
 	.minor = MISC_DYNAMIC_MINOR,
-	.name = "boeffla_wakelock_blocker",
+	.name = "wakelock_blocker",
 	.groups = wl_blocker_groups,
 };
 
@@ -215,17 +223,18 @@ static int __init wl_blocker_init(void)
 	if (!ret)
 		ret = misc_register(&wl_blocker_device);
 	if (ret)
-		pr_err("Boeffla WL blocker: not started (%d)\n", ret);
+		pr_err("WL blocker: not started (%d)\n", ret);
 	else
-		pr_info("Boeffla WL blocker: driver version %s started\n", WL_BLOCKER_VERSION);
+		pr_info("WL blocker: driver version %s started\n", WL_BLOCKER_VERSION);
 	return 0;
 }
 late_initcall(wl_blocker_init);
 
 """
 
-# (the block's first two lines: where one put there by an earlier run begins)
-BLOCK_START = BLOCK[: BLOCK.index("\n", 3)]
+# where a block put there by an earlier run begins (its opening comment, by this or an earlier
+# version of this script)
+BLOCK_START = "/*\n * Wakelock blocker"
 # the blocker goes in front of the function's kernel-doc comment
 DOC = "/**\n * wakeup_source_report_event - Report wakeup event using the given source.\n"
 REPORT_OLD = """static void wakeup_source_report_event(struct wakeup_source *ws, bool hard)

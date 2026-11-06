@@ -38,6 +38,13 @@
     "scope": "selected sparse touch component"
   },
   {
+    "component": "xiaomi-13-ultra-tof-source",
+    "url": "https://github.com/MiCode/Xiaomi_Kernel_OpenSource",
+    "revision": "16c625d2e63c5c38370f00fdff5e44be217ff6d5",
+    "branch": "ishtar-t-oss",
+    "scope": "drivers/input/stmvl53l5 only (ST VL53L5 ToF driver)"
+  },
+  {
     "component": "kernelsu",
     "url": "https://github.com/tiann/KernelSU",
     "revision": "0c0fdb960178fa12d80d6cbcfdcb6ad8be6a865d"

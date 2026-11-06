@@ -4,23 +4,25 @@
 
 [简体中文](README.zh-CN.md)
 
-[Download kernel packages](https://github.com/JiaqiLi404/android_kernel_618_for_sm8550/releases/tag/v6.18.32-nuwa.1) · Pre-release; physical-device validation is pending.
+[Download kernel packages](https://github.com/JiaqiLi404/android_kernel_618_for_sm8550/releases/tag/v6.18.32-nuwa.1) · Pre-release; physical-device validation is pending. Those packages predate the module-layer ramdisk and the 13 / 13 Ultra drivers; build from source for them.
 
-Device: **Xiaomi 13 Pro / nuwa**. Software target: **NikoHyper / HyperOS 4, OS4.0.24.0.XEOCNXM**. Other devices or ROM/vendor combinations require separate adaptation.
+Device: **Xiaomi 13 Pro / nuwa** (main target). Driver adaptations for the **Xiaomi 13 / fuxi** and **Xiaomi 13 Ultra / ishtar** are included (touch, panel tuning and DC dimming, camera PHY and OIS, PM8008 camera PMIC, ToF sensor, charger nodes) but have not been run on those phones yet. Software target: **NikoHyper / HyperOS 4, OS4.0.24.0.XEOCNXM**. Other ROM/vendor combinations require separate adaptation.
 
 ## What we added
 
 | Work | Value to users | Sources and implementation |
 |:--|:--|:--|
 | **Port 6.18 to SM8550** | Connect the newer kernel to the device's clock, UFS, USB, interconnect and power drivers | OnePlus driver foundation + MiCode device definitions; [driver origins](docs/PROVENANCE.en.md#drivers) |
-| **Integrate device and multimedia support** | Adapt display/composer, camera, video, DSP, touch/gestures and audio interfaces | Combine SM8850, SM8550 and Xiaomi sources and handle 6.18 API/ABI differences; [sources and adaptations](docs/PROVENANCE.en.md#drivers) |
-| **Match kernel, modules and boot images** | Produce a consistent 401-module payload, ramdisk, boot.img and AnyKernel3 package | 54 Xiaomi modules from official OTAs + rebuilt source modules; [firmware origins](docs/PROVENANCE.en.md#firmware) |
+| **Integrate device and multimedia support** | Adapt display/composer, camera, video, DSP, touch/gestures and audio interfaces, including the 13 / 13 Ultra variants | Combine SM8850, SM8550 and Xiaomi sources and handle 6.18 API/ABI differences; [sources and adaptations](docs/PROVENANCE.en.md#drivers) |
+| **Match kernel, modules and boot images** | Produce a consistent module payload (404 modules), module-layer ramdisk, boot.img and AnyKernel3 package | 54 Xiaomi modules from official OTAs + rebuilt source modules; [firmware origins](docs/PROVENANCE.en.md#firmware) |
 | **Memory, scheduling and power changes** | Provide reclaim, LZ4 1.10.1/ZSTD recompression, idle-path and wake controls | Each upstream origin and project adaptation is identified; [22 changes](docs/PROVENANCE.en.md#improvements) |
 | **Make builds reproducible and inspectable** | Pin and fetch dependencies, check ABI and packaging, and cap WSL build memory at 12 GiB | [Acquire inputs](docs/PROVENANCE.en.md#acquire) → [Build](docs/BUILD.en.md) → [Validate](docs/VALIDATION.en.md) |
 
 The main contribution is integrating these sources against one device interface and module ABI. Performance, power use and complete hardware behavior still require target-phone testing; see [validation scope](docs/VALIDATION.en.md#scope).
 
 ## How the key changes work
+
+**Boot with the device's own ramdisk.** The kernel carries only the project's module layer (`/lib/modules`, its load lists and the batch loader) and unpacks it after the ramdisk the bootloader passes. The device's vendor_boot/init_boot ramdisk, or a recovery/TWRP ramdisk, stays in charge; only same-named module files and lists are replaced. [Sources and implementation](docs/PROVENANCE.en.md#drivers)
 
 **LZ4: upstream 1.10.1.** Update the kernel's 1.8.3-based decoder to upstream C, serving EROFS file reads, zram and other callers. Arm64 64-byte wild copies can overrun the margin reserved for EROFS in-place decompression, so this port retains the 32-byte path and adapts kernel interfaces and module ABI. [Sources and implementation](docs/PROVENANCE.en.md#improvements)
 

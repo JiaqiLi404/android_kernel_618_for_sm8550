@@ -31,6 +31,13 @@ for relative in k618/ws/common k618/KernelSU k618/src/fuxi k618/soc; do
   git -C "$BUILD_ROOT/$relative" reset --hard HEAD
   git -C "$BUILD_ROOT/$relative" clean -fdx > "$BUILD_ROOT/clean-$(basename "$relative").log"
 done
+# A cache made before the current SoC patch or without the 13 Ultra ToF source cannot build this tree.
+want=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["target_tree"])' "$PROJECT_ROOT/provenance/soc-baseline.json")
+[ "$(git -C "$K618/soc" rev-parse 'HEAD^{tree}')" = "$want" ] &&
+  [ -f "$K618/src/ishtar/tree/drivers/input/stmvl53l5/stmvl53l5_module.c" ] || {
+  echo 'Offline cache predates the current inputs; use bash scripts/run-limited.sh bootstrap with an empty BUILD_ROOT.' >&2
+  exit 2
+}
 git -C "$K618/soc" config core.excludesFile "$PROJECT_ROOT/kernel-6.18/k618_soc_gitignore.txt"
 git -C "$K618/KernelSU" remote set-url origin https://github.com/tiann/KernelSU.git
 python3 - "$BUILD_ROOT" <<'PY'

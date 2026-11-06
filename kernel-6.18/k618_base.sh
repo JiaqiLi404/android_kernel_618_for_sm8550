@@ -8,7 +8,6 @@ J=${1:-8}; shift 2>/dev/null
 # from the committed tree each time: the fixes are made again, as the script has them now
 git -C $S checkout -q -- . || exit 1
 python3 -I $K618_DIR/k618_fix618.py $S || exit 1
-python3 -I $K618_DIR/k618_usb.py $S || exit 1
 cp $K618_DIR/k618_overrides.bzl $S/configs/
 bash $K618_DIR/k618_soc_build.sh configs/canoe_perf.bzl,k618_overrides.bzl $J \
 	clk-qcom gdsc-regulator clk-rpmh cmd-db qcom_rpmh smem socinfo qcom-scm qcom_ipc_logging \

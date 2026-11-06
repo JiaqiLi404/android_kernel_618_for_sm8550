@@ -20,8 +20,13 @@ EDITS = [
      """static bool k618_stock = true;
 module_param(k618_stock, bool, 0644);
 /* k618: 1 = THP (frames to touch_report, as stock with fts,support-thp), 0 = touches from the IC */
-static int k618_thp = 1;	/* Device compatibility. */
+static int k618_thp = -1;	/* -1 = as stock, from fts,support-thp: 13 Pro / 13 Ultra on, 13 off */
 module_param(k618_thp, int, 0644);
+static bool k618_dt_thp;	/* fts,support-thp of this phone's touch node (parse_dt) */
+static bool k618_thp_on(void)
+{
+	return k618_thp < 0 ? k618_dt_thp : k618_thp != 0;
+}
 static int k618_report_rate = -1;	/* stock info+0x3f0: re-sent at resume */
 """),
 
@@ -74,7 +79,7 @@ static int k618_report_rate = -1;	/* stock info+0x3f0: re-sent at resume */
      "\n"
      "int fts_enable_touch_raw(bool en)\n"
      "{\n"
-     "\tif (!k618_thp) {\n"
+     "\tif (!k618_thp_on()) {\n"
      "\t\tlogError(1, \"%s k618: enable_touch_raw %d refused (k618_thp=0)\\n\", tag, en);\n"
      "\t\treturn -EOPNOTSUPP;\n"
      "\t}\n"
@@ -322,7 +327,7 @@ static int k618_report_rate = -1;	/* stock info+0x3f0: re-sent at resume */
      "\t\t\t\tfts_enable_thp_selfcap_scan(value);\n"
      "\t\t\treturn 0;\n"
      "\t\tcase 3:\t\t/* THP on / off -- only when k618_thp allows it */\n"
-     "\t\t\tif (k618_thp)\n"
+     "\t\t\tif (k618_thp_on())\n"
      "\t\t\t\tfts_enable_thp_onoff(value);\n"
      "\t\t\treturn 0;\n"
      "\t\tcase 4:\t\t/* stock: an empty delayed work (fts_thp_signal_work) */\n"
@@ -365,8 +370,15 @@ static int k618_report_rate = -1;	/* stock info+0x3f0: re-sent at resume */
      "\tfts_info->enable_touch_delta = 1;\n#endif\n",
      "\tfts_info->enable_touch_delta = 1;\n"
      "\t/* k618: stock sets this from fts,support-thp -- the IC boots in THP mode */\n"
-     "\tfts_info->enable_touch_raw = k618_thp ? true : false;\n"
+     "\tfts_info->enable_touch_raw = k618_thp_on();\n"
      "#endif\n"),
+    # stock reads fts,support-thp in parse_dt: the 13 Pro's and 13 Ultra's touch nodes have it, the
+    # 13's (fuxi, firmware st_fts_m3) has not -- THP there would leave the IC sending frames that no
+    # touch_report reads (k618_thp -1 follows it; 0 / 1 still force off / on)
+    ("fts_spi/fts.c",
+     "\tbdata->support_fod =\n\t    of_property_read_bool(np, \"fts,support-fod\");\n",
+     "\tbdata->support_fod =\n\t    of_property_read_bool(np, \"fts,support-fod\");\n"
+     "\tk618_dt_thp = of_property_read_bool(np, \"fts,support-thp\");\t/* k618: THP as stock */\n"),
 
     # ================================================================== xiaomi/xiaomi_touch.h
     ("xiaomi/xiaomi_touch.h",
@@ -954,7 +966,7 @@ static int k618_report_rate = -1;	/* stock info+0x3f0: re-sent at resume */
 
     ("fts_spi/fts.c",
      "\txiaomitouch_register_modedata(0, &xiaomi_touch_interfaces);\n",
-     "\txiaomi_touch_interfaces.is_enable_touchraw = k618_thp ? true : false;\t/* k618: the node shows it */\n"
+     "\txiaomi_touch_interfaces.is_enable_touchraw = k618_thp_on();\t/* k618: the node shows it */\n"
      "\txiaomitouch_register_modedata(0, &xiaomi_touch_interfaces);\n"),
     ("xiaomi/xiaomi_touch.c",
      "\t\ttouch_data->get_touch_super_resolution_factor = data->get_touch_super_resolution_factor;\n",

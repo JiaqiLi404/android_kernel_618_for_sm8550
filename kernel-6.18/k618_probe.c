@@ -19,6 +19,7 @@
 #include <linux/limits.h>
 #include <linux/math64.h>
 #include <linux/module.h>
+#include <linux/namei.h>
 #include <linux/notifier.h>
 #include <linux/panic_notifier.h>
 #include <linux/pid.h>
@@ -2203,11 +2204,80 @@ static const struct ctl_table walt_compat_table[] = {
 };
 static struct ctl_table_header *walt_compat_hdr;
 
+/*
+ * in_recovery (read-only, the decision): a recovery boot gets no write guard. The 13 Pro has a
+ * recovery partition whose image carries no kernel (kernel_size 0), so the bootloader starts the
+ * boot partition's kernel -- ours -- with the recovery ramdisk, the ROM's or TWRP's. That ramdisk
+ * is unpacked with our modules over it, so this probe loads there as well; and a recovery is there
+ * to write partitions -- flash, wipe, format -- which the guard (GUARD=1 images only; armed by the
+ * first policy load, which a recovery does too) would refuse. The decision is logged either way,
+ * and readable in /sys/module/k618_probe/parameters/in_recovery.
+ * The test is first-stage init's own: the ramdisk
+ * has /system/bin/recovery and nothing says androidboot.force_normal_boot=1 (/proc is mounted
+ * before the first module loads; the value is in the bootconfig on this phone's generation, on the
+ * command line on older ones).
+ */
+static bool in_recovery;
+module_param(in_recovery, bool, 0444);
+
+static bool force_normal(const char *s)
+{
+	static const char key[] = "androidboot.force_normal_boot";
+
+	while ((s = strstr(s, key))) {
+		s += sizeof(key) - 1;
+		while (*s == ' ' || *s == '=' || *s == '"')
+			s++;
+		if (*s == '1')
+			return true;
+	}
+	return false;
+}
+
+static bool __init recovery_boot(void)
+{
+	static const char * const src[] = { "/proc/cmdline", "/proc/bootconfig" };
+	bool forced = false;
+	struct path p;
+	char *b;
+	int i;
+
+	if (kern_path("/system/bin/recovery", 0, &p))
+		return false;
+	path_put(&p);
+	b = kmalloc(8192, GFP_KERNEL);
+	if (!b)
+		return true;
+	for (i = 0; i < ARRAY_SIZE(src) && !forced; i++) {
+		struct file *f = filp_open(src[i], O_RDONLY, 0);
+		loff_t pos = 0;
+		ssize_t r;
+
+		if (IS_ERR(f))
+			continue;
+		r = kernel_read(f, b, 8192 - 1, &pos);
+		filp_close(f, NULL);
+		if (r <= 0)
+			continue;
+		b[r] = '\0';
+		forced = force_normal(b);
+	}
+	kfree(b);
+	return !forced;
+}
+
 static int __init k618_probe_init(void)
 {
 	pr_info("k618_probe: look at %u ms, force_code %u, log '%s%s' from %u ms every %u ms (poll %u), %u KB slots at +%u KB\n",
 		probe_ms, force_code, log_part, log_path, log_start_ms, log_every_ms, log_poll_ms,
 		log_slot_kb, log_offset_kb);
+	in_recovery = recovery_boot();
+	if (in_recovery) {
+		pr_emerg("k618_probe: recovery boot (/system/bin/recovery, no force_normal_boot)%s\n",
+			 stop_at_write_open || deny_write_open || ro_write_open ?
+			 ": no write guard, a recovery writes partitions" : "");
+		stop_at_write_open = deny_write_open = ro_write_open = false;
+	}
 	if (*allow_vols) {
 		pr_emerg("k618_probe: allow_vols '%s': persist %d, userdata %d, persist1 %d, none %d\n",
 			 allow_vols, vol_allowed("persist"), vol_allowed("userdata"),

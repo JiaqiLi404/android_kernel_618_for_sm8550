@@ -118,16 +118,19 @@ def main(argv):
         print(f"  {n}: {mdl}")
         if base is None and mdl.endswith("Kalama v2 SoC"):
             base = p
+    # K618_DT_DEVICE: another board's overlay out of the same dtbo -- Xiaomi's SM8550 dtbo.img
+    # carries every SM8550 model's (13 Ultra = ishtar, xiaomi,miboard-id 5; 13 = fuxi; nuwa is 1)
+    device = os.environ.get("K618_DT_DEVICE", "nuwa")
     ovl = None
     for n, o in enumerate(dtbo_entries(dtbo)):
         p = f"/tmp/k618_ovl{n}.dtbo"
         open(p, "wb").write(o)
         mdl = model(dtc(p))
-        if ovl is None and "nuwa" in mdl.lower():
+        if ovl is None and device in mdl.lower():
             ovl = p
             print(f"dtbo entry {n}: {mdl}")
     if not base or not ovl:
-        print("no kalama base or no nuwa overlay", file=sys.stderr)
+        print(f"no kalama base or no {device} overlay", file=sys.stderr)
         return 1
     subprocess.run([f"{TOOLS}/ufdt_apply_overlay", base, ovl, "/tmp/k618_dt.dtb"], check=True)
     dts = dtc("/tmp/k618_dt.dtb")
