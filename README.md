@@ -4,7 +4,7 @@
 
 [简体中文](README.zh-CN.md)
 
-[Download kernel packages](https://github.com/JiaqiLi404/android_kernel_618_for_sm8550/releases/tag/v6.18.32-nuwa.2) · Pre-release; physical-device validation is pending.
+[Download kernel packages](https://github.com/JiaqiLi404/android_kernel_618_for_sm8550/releases/tag/v6.18.32-nuwa.3) · Pre-release; physical-device validation is pending.
 
 Device: **Xiaomi 13 Pro / nuwa** (main target; both of its panel variants, 38 0c 0a and 42 02 0b, are handled). Driver adaptations for the **Xiaomi 13 / fuxi** and **Xiaomi 13 Ultra / ishtar** are included (touch, panel tuning and DC dimming, peak HDR, camera PHY, OIS and park lens, PM8008 camera PMIC, ToF sensor, charger nodes); they and the 42 02 0b panel have not been run on such units yet. Software target: **NikoHyper / HyperOS 4, OS4.0.24.0.XEOCNXM**. Other ROM/vendor combinations require separate adaptation.
 
